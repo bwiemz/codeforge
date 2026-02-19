@@ -10,9 +10,10 @@ CodeForge is a decoder-only transformer designed for code synthesis and understa
 
 | Concept | What it does |
 |---|---|
-| **TCFP-12** | FP8 E4M3 + 4-bit residual correction. ~12.5 bits/value, ~5–6 effective mantissa bits. 19% faster than BF16 on FP8-capable hardware (Hopper, Ada Lovelace, Blackwell). |
-| **Reclaimer Protocol** | Born-quantized training regime: QK-RMSNorm with frozen gains, post-norm (FOG) placement, z-loss stabilization, depth-scaled init. No full-precision warmup required. |
+| **TCFP-12** | FP8 E4M3 + 4-bit residual correction. ~12.5 bits/value, ~5-6 effective mantissa bits. 19% faster than BF16 on FP8-capable hardware (Hopper, Ada Lovelace, Blackwell). |
+| **Reclaimer Protocol** | Born-quantized training regime: QK-RMSNorm with frozen gains, post-norm (FOG) placement, z-loss stabilization, Smooth-SwiGLU activations, depth-scaled init, separate embedding LR. No full-precision warmup required. |
 | **ZSFTP** | Zero-Sync Fused Training Pipeline. GPU-resident loss accumulation, fused AdamW, chunked cross-entropy (75% peak VRAM reduction), `torch.compile` with Inductor, non-blocking prefetch. |
+| **Pre-tokenization** | Optional offline pipeline that runs the full data stack (quality filtering, dedup, decontamination, FIM) once and saves token IDs to a flat memmap file. Training then reads sequential uint16 tokens with near-zero I/O overhead. |
 
 ## Model presets
 
@@ -23,7 +24,7 @@ CodeForge is a decoder-only transformer designed for code synthesis and understa
 | `1b` | 2048 | 24 | 16 | 8 | 1 B |
 | `3b` | 3072 | 26 | 24 | 8 | 3 B |
 
-All presets use Grouped Query Attention, RoPE (with optional linear/NTK/YaRN scaling), SwiGLU feed-forward, RMSNorm, and weight-tied embeddings.
+All presets use Grouped Query Attention, RoPE (with optional linear/NTK/YaRN scaling), SwiGLU feed-forward (Smooth-SwiGLU for stability at scale), RMSNorm, and weight-tied embeddings.
 
 ## Architecture
 
@@ -44,7 +45,7 @@ Embedding (vocab 49 152 × dim, weight-tied with output head)
 │  Post-Norm (RMSNorm)                         │
 │  Residual add                                │
 │  ┌────────────────────────────────────────┐  │
-│  │ SwiGLU Feed-Forward                    │  │
+│  │ Smooth-SwiGLU Feed-Forward             │  │
 │  │   gate, up, down projections           │  │
 │  └────────────────────────────────────────┘  │
 │  Post-Norm (RMSNorm)                         │
@@ -80,16 +81,19 @@ codeforge/
 ├── model/          Transformer architecture, config presets, GQA, RoPE
 ├── tcfp/           TCFP quantization core, Triton kernels, cuBLASLt ext
 │   ├── tcfp12/     FP8 + 4-bit residual (TCFP-12)
-│   └── nn/         Quantized nn.Linear and related layers
+│   ├── nn/         Quantized nn.Linear and related layers
+│   └── training/   TCFP monitoring, presets, curriculum, checkpointing
 ├── tokenizer/      49K-vocab BPE tokenizer (code-optimized)
-├── data/           Dataset pipeline: quality scoring, dedup, FIM, mixing
+├── data/           Dataset pipeline: quality scoring, dedup, FIM, mixing,
+│                   pre-tokenized memmap support
 ├── training/       Trainer (ZSFTP), SFT, DPO, schedulers, optimizers
 ├── inference/      Generator with KV-cache, speculative decoding
 ├── eval/           HumanEval, MBPP harnesses
 └── export/         GGUF export, post-training INT8/INT4 quantization
 configs/            YAML presets for model sizes and training runs
-scripts/            Entry points: train, generate, evaluate, export
-tests/              pytest suite (TCFP, tokenizer, model)
+scripts/            Entry points: train, generate, evaluate, export,
+                    pretokenize, train_sft, train_dpo, train_tokenizer
+tests/              pytest suite (480+ tests: TCFP, tokenizer, model)
 ```
 
 ## Setup
@@ -108,10 +112,30 @@ Optional dependency groups: `triton`, `tracking`, `quantize`, `dev`.
 
 ## Usage
 
+### Pre-tokenization (recommended)
+
+Pre-tokenize once, then train from fast local memmap files instead of streaming from HuggingFace:
+
+```bash
+python scripts/pretokenize.py \
+  --config configs/pretrain_150m.yaml \
+  --output data/pretokenized/150m \
+  --max-tokens 30000000000
+```
+
+This runs the full data pipeline (quality filtering, dedup, decontamination, FIM) and writes:
+- `tokens.bin` — flat uint16 memmap of all token IDs
+- `index.npy` — per-sample `(offset, length)` index for shuffling
+- `metadata.json` — config snapshot and filtering stats
+
 ### Pretraining
 
 ```bash
-# Full run from YAML config
+# From pre-tokenized data (fast, deterministic)
+codeforge-train --config configs/pretrain_150m.yaml \
+  --pretokenized data/pretokenized/150m
+
+# From HuggingFace streaming (no pre-tokenization needed)
 codeforge-train --config configs/pretrain_150m.yaml
 
 # Smoke test (synthetic data, no data pipeline)
@@ -184,6 +208,8 @@ python scripts/export.py --quantize int8 \
 Key fields from `configs/pretrain_150m.yaml`:
 
 ```yaml
+model: configs/model_150m.yaml     # architecture (post-norm, QK-norm, etc.)
+
 data:
   hf_dataset: "bigcode/starcoderdata"
   languages: [python, javascript, typescript, java, cpp, c, go, rust]
@@ -192,13 +218,19 @@ data:
   enable_dedup: true
 
 training:
-  batch_size: 4
-  gradient_accumulation_steps: 64   # effective batch = 256
+  batch_size: 8
+  gradient_accumulation_steps: 32   # effective batch = 256
   learning_rate: 3.0e-4
-  max_steps: 100000
+  max_steps: 45000
   precision: bf16
+  scheduler_type: wsd               # Warmup-Stable-Decay
+  warmup_steps: 1500
+  embed_lr_ratio: 0.1               # separate embedding LR
   use_tcfp: true
   tcfp_warmup_steps: 0              # born-quantized from step 0
+  tcfp_delayed_scaling: true         # EMA-smoothed amax for stability
+  tcfp_abd: false                    # conservative: both GEMMs in backward
+  tcfp_srr: false                    # quality-first: EF + delayed_scaling
 ```
 
 ## Tests
