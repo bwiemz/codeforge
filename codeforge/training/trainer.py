@@ -588,6 +588,12 @@ class Trainer:
         # Raw model reference for TCFP monitoring (compile wrapper-safe)
         _raw_model = self._raw_model_ref
 
+        # Pre-resolve TCFP weight-dirty notification (avoid per-step import)
+        if self.config.use_tcfp:
+            from ..tcfp.nn import mark_tcfp_weights_updated as _mark_tcfp
+        else:
+            _mark_tcfp = lambda _model: None  # noqa: E731
+
         # GPU-resident loss accumulator — no .item() until logging time
         accumulation_loss = torch.tensor(0.0, device=self.device)
         step_start_time = time.time()
@@ -651,6 +657,11 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
                 self.global_step += 1
+
+                # Notify TCFP layers that weights changed so EF updates on next forward.
+                # Required because fused optimizers don't increment weight._version.
+                if self.config.use_tcfp:
+                    _mark_tcfp(_raw_model)
 
                 # Capture step wall time (covers one full optimizer step's worth of microsteps)
                 _step_wall_ms = (time.perf_counter() - _step_wall_start) * 1000

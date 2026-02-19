@@ -201,7 +201,7 @@ class TestGradientAccumulation:
         assert torch.equal(ef_after_first, ef_after_second)
 
     def test_grad_accum_resumes_after_step(self) -> None:
-        """After optimizer.step(), EF update resumes."""
+        """After optimizer.step() + mark_weights_updated(), EF update resumes."""
         layer = TCFPLinear(
             128, 64, use_tensor_cores=True, error_feedback=True,
         ).to(DEVICE)
@@ -213,28 +213,31 @@ class TestGradientAccumulation:
         x1 = torch.randn(4, 128, device=DEVICE, requires_grad=True)
         layer(x1).sum().backward()
 
-        # Optimizer step changes weight in-place → version increments
+        # After first forward, dirty flag should be consumed
+        assert not layer._weights_dirty, "Dirty flag not cleared after forward"
+
+        # Optimizer step changes weight in-place
         opt.step()
         opt.zero_grad()
 
-        # Snapshot version BEFORE the post-step forward
-        ver_after_step = layer.weight._version
+        # Simulate what the trainer does: mark weights dirty
+        layer.mark_weights_updated()
+        assert layer._weights_dirty, "mark_weights_updated() did not set flag"
 
-        # Next forward should update EF (weight changed)
+        # Next forward should update EF (weights marked dirty)
         x2 = torch.randn(4, 128, device=DEVICE, requires_grad=True)
         layer(x2).sum().backward()
 
-        # The version tracking should have consumed the new version
-        assert layer._last_weight_version == ver_after_step, (
-            "Version tracking did not update after optimizer.step()"
+        # The dirty flag should have been consumed
+        assert not layer._weights_dirty, (
+            "Dirty flag not cleared after post-step forward"
         )
 
-        # A second forward without step() should NOT update version tracking
-        ver_before = layer._last_weight_version
+        # A second forward without mark_weights_updated() should NOT set dirty
         x3 = torch.randn(4, 128, device=DEVICE, requires_grad=True)
         layer(x3).sum().backward()
-        assert layer._last_weight_version == ver_before, (
-            "Version tracking changed without optimizer.step()"
+        assert not layer._weights_dirty, (
+            "Dirty flag set without mark_weights_updated()"
         )
 
     def test_grad_accum_output_consistent(self) -> None:

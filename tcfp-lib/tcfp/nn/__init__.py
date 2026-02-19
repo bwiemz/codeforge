@@ -379,7 +379,10 @@ class _TCFP12TensorCoreFunction(torch.autograd.Function):
             w_reconstructed = (
                 w_hi_fp8.float() * w_hi_inv + w_lo_fp8.float() * w_lo_inv
             )
-            quant_error = weight.float() - w_reconstructed
+            # Use error-corrected weight (w = weight + old_error), not raw weight.
+            # The quantization was performed on w, so the residual must be
+            # relative to w for proper error feedback accumulation.
+            quant_error = w - w_reconstructed
             error_state.update_error(param_name, quant_error)
 
         # --- 5. Flatten input to 2D, quantise activation once ---
@@ -597,7 +600,7 @@ class _TCFP12BlockScaledFunction(torch.autograd.Function):
         error_buf: torch.Tensor | None = None
         if error_state is not None:
             # get_error creates buffer with same dtype as `like` — must be FP32
-            error_buf = error_state.get_error(param_name, weight.float())
+            buf = error_state.get_error(param_name, weight.float())
             # During checkpoint recomputation (no_grad) or gradient
             # accumulation (weight unchanged) or checkpoint recomputation,
             # clone the buffer so the kernel reads the correct old-error
@@ -605,7 +608,8 @@ class _TCFP12BlockScaledFunction(torch.autograd.Function):
             # update_ef incorporates both version check and grad context
             # (checked in TCFPLinear.forward, before Function.apply).
             if not update_ef:
-                error_buf = error_buf.clone()
+                buf = buf.clone()
+            error_buf = buf
 
         # --- 2. Flatten input to 2D ---
         input_shape = input.shape
@@ -941,7 +945,7 @@ class TCFPLinear(nn.Module):
         if use_tensor_cores and error_feedback and not srr:
             self._error_state = ErrorFeedbackState()
         self._param_name: str = ""
-        self._last_weight_version: int = -1
+        self._weights_dirty: bool = True  # True = EF needs update on next forward
         self._bf16_fallback: bool = False
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
@@ -967,6 +971,16 @@ class TCFPLinear(nn.Module):
         """Restore TCFP quantisation after a BF16 fallback."""
         self._bf16_fallback = False
 
+    def mark_weights_updated(self) -> None:
+        """Signal that optimizer.step() has modified weights.
+
+        Must be called after each optimizer step so that the next forward
+        pass recomputes error feedback buffers.  This replaces the old
+        ``weight._version`` check, which fused optimizers (e.g.
+        ``AdamW(fused=True)``) do not increment reliably.
+        """
+        self._weights_dirty = True
+
     @torch.compiler.disable  # type: ignore[attr-defined]
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # pyright: ignore[reportIncompatibleMethodOverride]
         # BF16 fallback — bypass all quantisation
@@ -986,12 +1000,11 @@ class TCFPLinear(nn.Module):
             # NOTE: torch.is_grad_enabled() must be checked HERE, not inside
             # the autograd Function's forward, because PyTorch always disables
             # gradients inside Function.forward().
-            ver = self.weight._version  # pyright: ignore[reportAttributeAccessIssue]
-            update_ef = (
-                ver != self._last_weight_version and torch.is_grad_enabled()
-            )
+            # Uses explicit dirty flag (set by mark_weights_updated) instead of
+            # weight._version, which fused optimizers may not increment.
+            update_ef = self._weights_dirty and torch.is_grad_enabled()
             if update_ef:
-                self._last_weight_version = ver
+                self._weights_dirty = False
 
             if self.mode == TCFPMode.TCFP12 and self.scale_block_size is not None:
                 result: torch.Tensor = _TCFP12BlockScaledFunction.apply(  # pyright: ignore[reportAssignmentType]
@@ -1349,6 +1362,18 @@ def convert_to_tcfp(
             setattr(model, name, new_module)
 
     return model
+
+
+def mark_tcfp_weights_updated(model: nn.Module) -> None:
+    """Notify all TCFPLinear layers that optimizer.step() has run.
+
+    Call this after every optimizer step so EF buffers are recomputed on
+    the next forward pass. Required because fused optimizers (e.g.
+    ``AdamW(fused=True)``) may not increment ``weight._version``.
+    """
+    for module in model.modules():
+        if isinstance(module, TCFPLinear):
+            module.mark_weights_updated()
 
 
 # ---------------------------------------------------------------------------
