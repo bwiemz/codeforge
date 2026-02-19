@@ -21,6 +21,7 @@ import json
 import struct
 import sys
 import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def create_language_streams(
     hf_dataset: str,
     languages: list[str],
     hf_dataset_kwargs: dict | None = None,
-) -> dict[str, object]:
+) -> dict[str, Iterator[str]]:
     """Create per-language iterators from HuggingFace dataset.
 
     Mirrors MixedCodeDataset._create_language_streams exactly.
@@ -45,7 +46,7 @@ def create_language_streams(
     from datasets import load_dataset
 
     hf_dataset_kwargs = hf_dataset_kwargs or {}
-    streams: dict[str, object] = {}
+    streams: dict[str, Iterator[str]] = {}
 
     for lang in languages:
         try:
@@ -167,7 +168,7 @@ def main() -> None:
         "python", "javascript", "typescript", "java", "cpp", "c", "go", "rust",
     ])
 
-    print(f"\nPre-tokenization config:")
+    print("\nPre-tokenization config:")
     print(f"  Dataset: {hf_dataset}")
     print(f"  Languages: {', '.join(languages)}")
     print(f"  Quality threshold: {data_config.get('quality_threshold', 0.3)}")
@@ -190,7 +191,7 @@ def main() -> None:
     meta_path = output_dir / "metadata.json"
 
     # Stream, filter, tokenize, write
-    print(f"\nPre-tokenizing...")
+    print("\nPre-tokenizing...")
     start_time = time.time()
 
     mixed = mixer.mix_streams(streams)
@@ -259,7 +260,7 @@ def main() -> None:
     # Print summary
     gb_written = (total_tokens * 2) / (1024**3)
     tps = total_tokens / elapsed if elapsed > 0 else 0
-    print(f"\nPre-tokenization complete:")
+    print("\nPre-tokenization complete:")
     print(f"  Samples:  {total_samples:,}")
     print(f"  Tokens:   {total_tokens:,}")
     print(f"  Size:     {gb_written:.2f} GB")

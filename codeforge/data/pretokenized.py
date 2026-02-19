@@ -11,8 +11,8 @@ Storage format:
 """
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
