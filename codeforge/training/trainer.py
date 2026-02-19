@@ -79,6 +79,9 @@ class TrainingConfig:
     tcfp_monitor_interval: int = 100    # Steps between EF buffer health checks
     tcfp_disable_compile: bool = True   # Disable torch.compile (TCFP Triton already JIT)
 
+    # Reclaimer Protocol
+    embed_lr_ratio: float = 0.1  # Embedding LR = learning_rate * this ratio
+
     @property
     def effective_batch_size(self) -> int:
         return self.batch_size * self.gradient_accumulation_steps
@@ -191,22 +194,29 @@ class Trainer:
             print("  torch.compile disabled (TCFP Triton kernels are already JIT-compiled)")
 
         # Optimizer: Fused AdamW runs entirely on GPU — no CPU-GPU sync per step
+        # 3 param groups: (1) decay, (2) no-decay, (3) embedding with separate LR
+        embed_param = model.tok_embeddings.weight  # Same tensor as output.weight (tied)
+        embed_ptr = embed_param.data_ptr()
+
         no_decay = {"bias", "norm", "RMSNorm"}
+        decay_params = []
+        no_decay_params = []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p.data_ptr() == embed_ptr:
+                continue  # Embedding goes in its own group
+            if any(nd in name for nd in no_decay):
+                no_decay_params.append(p)
+            else:
+                decay_params.append(p)
+
+        embed_lr = config.learning_rate * config.embed_lr_ratio
+
         param_groups = [
-            {
-                "params": [
-                    p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": config.weight_decay,
-            },
-            {
-                "params": [
-                    p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": 0.0,
-            },
+            {"params": decay_params, "weight_decay": config.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+            {"params": [embed_param], "lr": embed_lr, "weight_decay": 0.0},
         ]
         use_fused = config.use_fused_optimizer and self.device.type == "cuda"
         self.optimizer = torch.optim.AdamW(
@@ -645,6 +655,11 @@ class Trainer:
 
                     # TCFP health monitoring and benchmark recording
                     if self.config.use_tcfp and self._tcfp_monitor is not None:
+                        # Enable kurtosis capture at L3 intervals
+                        if self.global_step % self._tcfp_monitor.l3_interval == 0:
+                            for layer in _raw_model.layers:
+                                layer._capture_kurtosis = True
+
                         alerts = self._tcfp_monitor.check(
                             model=_raw_model,
                             loss=loss_val,

@@ -145,6 +145,8 @@ def _layer_tensor_name(layer_idx: int, suffix: str) -> str:
         "attn.wk.weight": f"blk.{layer_idx}.attn_k.weight",
         "attn.wv.weight": f"blk.{layer_idx}.attn_v.weight",
         "attn.wo.weight": f"blk.{layer_idx}.attn_output.weight",
+        "attn.q_norm.weight": f"blk.{layer_idx}.attn_q_norm.weight",
+        "attn.k_norm.weight": f"blk.{layer_idx}.attn_k_norm.weight",
         "ffn_norm.weight": f"blk.{layer_idx}.ffn_norm.weight",
         "ffn.gate_proj.weight": f"blk.{layer_idx}.ffn_gate.weight",
         "ffn.up_proj.weight": f"blk.{layer_idx}.ffn_up.weight",

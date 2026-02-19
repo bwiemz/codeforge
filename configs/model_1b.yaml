@@ -1,4 +1,4 @@
-vocab_size: 32000
+vocab_size: 49152
 dim: 2048
 n_layers: 24
 n_heads: 16
@@ -8,3 +8,7 @@ ffn_hidden_mult: 2.667
 norm_eps: 1.0e-6
 dropout: 0.0
 rope_theta: 10000.0
+# Reclaimer Protocol
+use_post_norm: true
+use_qk_norm: true
+z_loss_alpha: 1.0e-4

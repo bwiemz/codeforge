@@ -1,5 +1,4 @@
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -49,10 +48,11 @@ def chunked_cross_entropy(
 
 
 class TransformerBlock(nn.Module):
-    """Single transformer block with pre-norm architecture."""
+    """Single transformer block with configurable pre/post-norm architecture."""
 
     def __init__(self, config: ModelConfig, layer_idx: int = 0):
         super().__init__()
+        self.use_post_norm = config.use_post_norm
         self.attn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attn = GroupedQueryAttention(config)
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
@@ -60,18 +60,34 @@ class TransformerBlock(nn.Module):
         self.layer_idx = layer_idx
 
         # Depth-scaled residual: scale by 1/sqrt(2*n_layers) for stability
-        self._residual_scale = 1.0 / math.sqrt(2 * config.n_layers) if config.depth_scaled_init else 1.0
+        if config.depth_scaled_init:
+            self._residual_scale = 1.0 / math.sqrt(2 * config.n_layers)
+        else:
+            self._residual_scale = 1.0
 
     def forward(
         self,
         x: torch.Tensor,
         freqs: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        kv_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
-        attn_out, new_cache = self.attn(self.attn_norm(x), freqs, mask, kv_cache)
-        x = x + attn_out * self._residual_scale
-        x = x + self.ffn(self.ffn_norm(x)) * self._residual_scale
+        mask: torch.Tensor | None = None,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+        if self.use_post_norm:
+            # FOG post-norm: norm AFTER sublayer, BEFORE residual add
+            attn_out, new_cache = self.attn(x, freqs, mask, kv_cache)
+            x = x + self.attn_norm(attn_out) * self._residual_scale
+            x = x + self.ffn_norm(self.ffn(x)) * self._residual_scale
+        else:
+            # Pre-norm (LLaMA-style): norm BEFORE sublayer
+            attn_out, new_cache = self.attn(self.attn_norm(x), freqs, mask, kv_cache)
+            x = x + attn_out * self._residual_scale
+            x = x + self.ffn(self.ffn_norm(x)) * self._residual_scale
+
+        # Kurtosis capture (zero overhead when not requested; flag cleared after capture)
+        if hasattr(self, '_capture_kurtosis') and self._capture_kurtosis:
+            self._last_output_for_kurtosis = x
+            self._capture_kurtosis = False
+
         return x, new_cache
 
 
@@ -121,13 +137,25 @@ class CodeForgeModel(nn.Module):
 
         self.apply(self._init_weights)
 
+        # Scale output projections by 1/sqrt(2*n_layers) for proper signal propagation
+        # Targets: attn.wo (attention output) and ffn.down_proj (FFN output)
+        output_scale = 1.0 / math.sqrt(2 * config.n_layers)
+        with torch.no_grad():
+            for layer in self.layers:
+                layer.attn.wo.weight.mul_(output_scale)
+                layer.ffn.down_proj.weight.mul_(output_scale)
+
     def _init_weights(self, module: nn.Module) -> None:
+        # Skip output projection — its weight IS tok_embeddings.weight (tied),
+        # and we want the Embedding init (N(0, 1/sqrt(dim))) to persist.
+        if module is self.output:
+            return
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=1.0 / math.sqrt(self.config.dim))
 
     def set_gradient_checkpointing(self, enabled: bool) -> None:
         """Enable/disable gradient checkpointing at runtime."""
@@ -136,10 +164,10 @@ class CodeForgeModel(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        targets: Optional[torch.Tensor] = None,
-        kv_caches: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        targets: torch.Tensor | None = None,
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         start_pos: int = 0,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[list[tuple[torch.Tensor, torch.Tensor]]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, torch.Tensor]] | None]:
         batch, seq_len = tokens.shape
         x = self.tok_embeddings(tokens)
 
@@ -166,7 +194,21 @@ class CodeForgeModel(nn.Module):
 
         loss = None
         if targets is not None:
-            loss = chunked_cross_entropy(logits, targets, self.config.vocab_size)
+            ce_loss = chunked_cross_entropy(logits, targets, self.config.vocab_size)
+            # Z-loss: penalizes large logit magnitudes to prevent FP8-amplified divergence
+            # Chunked to avoid materializing full FP32 logits (vocab=49152 → ~1.6GB)
+            if self.config.z_loss_alpha > 0.0:
+                z_accum = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+                z_count = 0
+                for z_start in range(0, seq_len, 512):
+                    z_end = min(z_start + 512, seq_len)
+                    chunk = logits[:, z_start:z_end, :]
+                    z_accum = z_accum + (torch.logsumexp(chunk.float(), dim=-1) ** 2).sum()
+                    z_count += batch * (z_end - z_start)
+                z_loss = self.config.z_loss_alpha * z_accum / max(z_count, 1)
+                loss = ce_loss + z_loss
+            else:
+                loss = ce_loss
 
         return logits, loss, new_kv_caches
 

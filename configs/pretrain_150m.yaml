@@ -1,6 +1,6 @@
-# CodeForge 150M Pretraining Config
+# CodeForge 150M Pretraining Config — Reclaimer Protocol
+# Born-quantized architecture with TCFP FP8 training
 # Optimized for single consumer GPU (8-24 GB VRAM)
-# Overtrained approach (phi-1 style): quality > quantity for small models
 
 model: configs/model_150m.yaml
 tokenizer_path: tokenizer/codeforge.json
@@ -34,7 +34,7 @@ data:
   seed: 42
 
 training:
-  # Effective batch = 4 * 64 = 256 sequences (same effective batch, lower peak memory)
+  # Effective batch = 4 * 64 = 256 sequences
   # Tokens/step = 256 * 2048 = 524,288
   # 100K steps = ~52B tokens
   batch_size: 4
@@ -43,7 +43,7 @@ training:
   weight_decay: 0.1
   max_grad_norm: 1.0
   min_lr_ratio: 0.1
-  warmup_steps: 2000
+  warmup_steps: 3000
   max_steps: 100000
   precision: bf16
   checkpoint_dir: checkpoints/pretrain_150m
@@ -53,16 +53,17 @@ training:
   use_wandb: false
   wandb_project: codeforge-150m
 
+  # Reclaimer Protocol: separate embedding LR
+  embed_lr_ratio: 0.1
+
   # TCFP — Tensor Core Floating Point (custom FP8 format)
-  # Benchmarked at 19% faster than BF16, identical perplexity on TinyGPT.
-  # This run is the first test at 100M parameter scale.
   use_tcfp: true
-  tcfp_warmup_steps: 0          # Quantize immediately (resuming from step 26,500)
+  tcfp_warmup_steps: 0          # FP8 from step 0 (born-quantized)
   tcfp_use_tensor_cores: true   # Real FP8 GEMMs via torch._scaled_mm
   tcfp_delayed_scaling: true    # EMA-smoothed W_hi amax for numerical stability
   tcfp_use_fused_kernel: true   # Triton fused dual-GEMM (load activation once)
   tcfp_use_cuda_ext: true       # cuBLASLt C++ extension when available
   tcfp_abd: false               # Conservative: keep both GEMMs in backward
-  tcfp_srr: true                # SRR enabled: drops FP32 EF buffers (~600 MB savings)
-  tcfp_monitor_interval: 100    # Log EF buffer health every 100 steps
+  tcfp_srr: false               # Quality-first: use EF + delayed_scaling
+  tcfp_monitor_interval: 100    # Log EF buffer + kurtosis health every 100 steps
   tcfp_disable_compile: true    # Triton kernels already JIT; compile adds overhead

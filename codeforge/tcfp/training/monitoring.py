@@ -61,6 +61,10 @@ class TCFPMonitor:
         self.l2_interval = l2_interval
         self.l3_interval = l3_interval
 
+        # Kurtosis monitoring (L3): track per-layer activation kurtosis
+        self.kurtosis_history: dict[str, list[tuple[int, float]]] = {}
+        self.kurtosis_window: int = 500  # Steps to look back for doubling detection
+
     def check(
         self,
         model: nn.Module,
@@ -171,6 +175,42 @@ class TCFPMonitor:
                             step=step,
                         )
                     )
+
+            # ── L3 addition: per-layer activation kurtosis ──────────────────
+            for mod_name, module in model.named_modules():
+                if not hasattr(module, '_last_output_for_kurtosis'):
+                    continue
+                x = module._last_output_for_kurtosis.detach().float()
+                del module._last_output_for_kurtosis
+                var = x.var()
+                if var < 1e-12:
+                    continue
+                mean = x.mean()
+                kurt = float(((x - mean) ** 4).mean() / (var ** 2) - 3.0)
+
+                history = self.kurtosis_history.setdefault(mod_name, [])
+                history.append((step, kurt))
+                # Trim entries older than kurtosis_window
+                cutoff = step - self.kurtosis_window
+                trimmed = [(s, k) for s, k in history if s >= cutoff]
+                self.kurtosis_history[mod_name] = trimmed
+
+                # Alert if kurtosis doubled within the window
+                if len(trimmed) >= 2 and abs(trimmed[0][1]) > 1e-6:
+                    ratio = kurt / trimmed[0][1]
+                    if ratio > 2.0:
+                        alerts.append(
+                            TrainingAlert(
+                                level="WARNING",
+                                layer=mod_name,
+                                reason=(
+                                    f"Kurtosis doubled: {trimmed[0][1]:.2f} -> "
+                                    f"{kurt:.2f} ({ratio:.1f}x)"
+                                ),
+                                value=kurt,
+                                step=step,
+                            )
+                        )
 
         return alerts
 

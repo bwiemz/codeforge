@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import ModelConfig
+from .layers import RMSNorm
 
 
 def precompute_rope_frequencies(
@@ -104,6 +105,15 @@ class GroupedQueryAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
+        # QK-RMSNorm: constrain Q/K magnitude before RoPE (FP8 stability)
+        self.use_qk_norm = config.use_qk_norm
+        if self.use_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, config.norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, config.norm_eps)
+            # Freeze gains — fixed at 1.0, no gradient needed
+            self.q_norm.weight.requires_grad_(False)
+            self.k_norm.weight.requires_grad_(False)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -116,6 +126,11 @@ class GroupedQueryAttention(nn.Module):
         q = self.wq(x).view(batch, seq_len, self.n_heads, self.head_dim)
         k = self.wk(x).view(batch, seq_len, self.n_kv_heads, self.head_dim)
         v = self.wv(x).view(batch, seq_len, self.n_kv_heads, self.head_dim)
+
+        # QK-norm before RoPE: prevents attention entropy collapse in FP8
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # Apply rotary embeddings to Q and K
         q, k = apply_rotary_emb(q, k, freqs)

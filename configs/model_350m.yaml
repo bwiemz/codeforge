@@ -1,4 +1,4 @@
-vocab_size: 32000
+vocab_size: 49152
 dim: 1024
 n_layers: 24
 n_heads: 16
@@ -10,3 +10,7 @@ dropout: 0.0
 rope_theta: 10000.0
 use_gradient_checkpointing: true
 depth_scaled_init: true
+# Reclaimer Protocol
+use_post_norm: true
+use_qk_norm: true
+z_loss_alpha: 1.0e-4

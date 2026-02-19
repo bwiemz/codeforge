@@ -1,10 +1,14 @@
-vocab_size: 32000
-dim: 3200
+vocab_size: 49152
+dim: 3072
 n_layers: 26
-n_heads: 32
+n_heads: 24
 n_kv_heads: 8
 max_seq_len: 2048
 ffn_hidden_mult: 2.667
 norm_eps: 1.0e-6
 dropout: 0.0
 rope_theta: 10000.0
+# Reclaimer Protocol
+use_post_norm: true
+use_qk_norm: true
+z_loss_alpha: 1.0e-4

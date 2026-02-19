@@ -7,7 +7,7 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    vocab_size: int = 32000
+    vocab_size: int = 49152
     dim: int = 768
     n_layers: int = 12
     n_heads: int = 12
@@ -25,6 +25,11 @@ class ModelConfig:
     # Phase 2: Training efficiency
     use_gradient_checkpointing: bool = False
     depth_scaled_init: bool = True  # scale residual by 1/sqrt(2*n_layers)
+
+    # Reclaimer Protocol: born-quantized architecture for FP8 training
+    use_post_norm: bool = True       # FOG post-norm (norm after sublayer, before residual add)
+    use_qk_norm: bool = True         # QK-RMSNorm with frozen gains before RoPE
+    z_loss_alpha: float = 1e-4       # Z-loss coefficient (0.0 disables)
 
     @property
     def head_dim(self) -> int:
@@ -57,9 +62,10 @@ class ModelConfig:
         )
         ffn_per_layer = 3 * self.dim * self.ffn_hidden_dim  # gate, up, down
         norm_per_layer = 2 * self.dim  # 2x RMSNorm per layer
+        qk_norm_per_layer = 2 * self.head_dim if self.use_qk_norm else 0
         total = (
             embed
-            + self.n_layers * (attn_per_layer + ffn_per_layer + norm_per_layer)
+            + self.n_layers * (attn_per_layer + ffn_per_layer + norm_per_layer + qk_norm_per_layer)
             + self.dim  # final norm
             # output projection is weight-tied with embedding
         )
@@ -90,9 +96,9 @@ PRESETS = {
         ffn_hidden_mult=2.667,
     ),
     "3b": ModelConfig(
-        dim=3200,
+        dim=3072,
         n_layers=26,
-        n_heads=32,
+        n_heads=24,
         n_kv_heads=8,
         ffn_hidden_mult=2.667,
     ),
