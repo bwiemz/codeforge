@@ -31,7 +31,7 @@ class SFTDataset(IterableDataset):
     def __init__(
         self,
         data_paths: list[str | Path] | None = None,
-        tokenizer: CodeForgeTokenizer = None,
+        tokenizer: CodeForgeTokenizer | None = None,
         max_seq_len: int = 2048,
         hf_dataset: str | None = None,
         hf_split: str = "train",
