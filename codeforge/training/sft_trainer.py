@@ -6,17 +6,16 @@ on assistant response tokens (instruction tokens are masked out).
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import torch
-import torch.nn as nn
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
 from ..model.transformer import CodeForgeModel
 from ..tokenizer.tokenizer import CodeForgeTokenizer
-from .chat_template import Conversation, Message, format_instruction_pair
+from .chat_template import Conversation, Message
 from .scheduler import get_cosine_schedule_with_warmup
 
 
@@ -31,10 +30,10 @@ class SFTDataset(IterableDataset):
 
     def __init__(
         self,
-        data_paths: Optional[list[str | Path]] = None,
+        data_paths: list[str | Path] | None = None,
         tokenizer: CodeForgeTokenizer = None,
         max_seq_len: int = 2048,
-        hf_dataset: Optional[str] = None,
+        hf_dataset: str | None = None,
         hf_split: str = "train",
     ):
         self.data_paths = [Path(p) for p in (data_paths or [])]
@@ -70,7 +69,7 @@ class SFTDataset(IterableDataset):
         if self.hf_dataset:
             yield from self._load_hf_conversations()
 
-    def _parse_sample(self, data: dict) -> Optional[Conversation]:
+    def _parse_sample(self, data: dict) -> Conversation | None:
         """Parse a single sample dict into a Conversation."""
         conv = Conversation()
 
@@ -243,7 +242,7 @@ class SFTTrainer:
         loader = DataLoader(self.dataset, batch_size=self.batch_size)
 
         accumulation_loss = 0.0
-        step_start = time.time()
+        time.time()
         pbar = tqdm(total=self.max_steps, desc="SFT Training")
 
         for micro_step, batch in enumerate(loader):
@@ -273,7 +272,7 @@ class SFTTrainer:
                     lr = self.scheduler.get_last_lr()[0]
                     pbar.set_postfix(loss=f"{accumulation_loss:.4f}", lr=f"{lr:.2e}")
                     pbar.update(self.log_every)
-                    step_start = time.time()
+                    time.time()
 
                 accumulation_loss = 0.0
 

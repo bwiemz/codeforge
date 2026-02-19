@@ -9,19 +9,16 @@ Reference: "Direct Preference Optimization: Your Language Model is Secretly a Re
 """
 
 import json
-import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
 from ..model.transformer import CodeForgeModel
 from ..tokenizer.tokenizer import CodeForgeTokenizer
-from .chat_template import Conversation, Message
 from .scheduler import get_cosine_schedule_with_warmup
 
 

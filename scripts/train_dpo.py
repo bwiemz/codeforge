@@ -1,7 +1,6 @@
 """DPO training entry point."""
 
 import argparse
-import copy
 import sys
 from pathlib import Path
 
@@ -9,10 +8,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from codeforge.tokenizer.tokenizer import CodeForgeTokenizer
+
 from codeforge.model.config import ModelConfig
 from codeforge.model.transformer import CodeForgeModel
-from codeforge.tokenizer.tokenizer import CodeForgeTokenizer
-from codeforge.training.dpo_trainer import DPOTrainer, DPODataset
+from codeforge.training.dpo_trainer import DPODataset, DPOTrainer
 
 
 def main():
