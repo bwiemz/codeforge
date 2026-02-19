@@ -1,0 +1,64 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# Training artifacts
+checkpoints/
+logs/
+wandb/
+*.pt
+*.bin
+*.safetensors
+tcfp_benchmark.jsonl
+training_debug.log
+training.log
+training.pid
+training_stderr.log
+training_watchdog.log
+training_watchdog.pid
+
+# Tokenizer artifacts
+tokenizer/*.json
+tokenizer/*.model
+
+# Data
+data/raw/
+data/processed/
+
+# Profiling
+*.prof
+*.lprof
+*.pdf
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.serena/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Windows scripts (local-only)
+*.bat
+*.ps1
+
+# Misc local files
+profile_*.py
+_write*.py
+write_profiler.py
+pyrightconfig.json
+tmpclaude-*
+.claude/

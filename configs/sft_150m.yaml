@@ -1,0 +1,25 @@
+# CodeForge 150M SFT (Supervised Fine-Tuning) Config
+# Run after pretraining to teach instruction following
+
+model_checkpoint: checkpoints/pretrain_150m/latest.pt
+tokenizer_path: tokenizer/codeforge.json
+
+data:
+  hf_dataset: "ise-uiuc/Magicoder-OSS-Instruct-75K"
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  min_lr_ratio: 0.01
+  warmup_steps: 200
+  max_steps: 10000
+  precision: bf16
+  checkpoint_dir: checkpoints/sft_150m
+  checkpoint_every: 2000
+  eval_every: 1000
+  log_every: 10
+  use_wandb: false
+  wandb_project: codeforge-sft-150m

@@ -1,0 +1,12 @@
+vocab_size: 32000
+dim: 1024
+n_layers: 24
+n_heads: 16
+n_kv_heads: 4
+max_seq_len: 2048
+ffn_hidden_mult: 2.667
+norm_eps: 1.0e-6
+dropout: 0.0
+rope_theta: 10000.0
+use_gradient_checkpointing: true
+depth_scaled_init: true

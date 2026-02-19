@@ -1,0 +1,10 @@
+vocab_size: 32000
+dim: 2048
+n_layers: 24
+n_heads: 16
+n_kv_heads: 8
+max_seq_len: 2048
+ffn_hidden_mult: 2.667
+norm_eps: 1.0e-6
+dropout: 0.0
+rope_theta: 10000.0

@@ -1,0 +1,53 @@
+# CodeForge 350M Pretraining Config
+# Requires 12+ GB VRAM with gradient checkpointing
+
+model: configs/model_350m.yaml
+tokenizer_path: tokenizer/codeforge.json
+
+data:
+  hf_dataset: "bigcode/starcoderdata"
+  languages:
+    - python
+    - javascript
+    - typescript
+    - java
+    - cpp
+    - c
+    - go
+    - rust
+  language_weights:
+    python: 0.35
+    javascript: 0.12
+    typescript: 0.12
+    java: 0.10
+    cpp: 0.08
+    c: 0.05
+    go: 0.07
+    rust: 0.07
+  quality_threshold: 0.35
+  enable_dedup: true
+  dedup_threshold: 0.8
+  enable_decontamination: true
+  fim_rate: 0.5
+  gradient_checkpointing: true
+  seed: 42
+
+training:
+  # Effective batch = 4 * 64 = 256 sequences
+  # Tokens/step = 256 * 2048 = 524,288
+  # 150K steps = ~78B tokens
+  batch_size: 4
+  gradient_accumulation_steps: 64
+  learning_rate: 3.0e-4
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  min_lr_ratio: 0.1
+  warmup_steps: 2000
+  max_steps: 150000
+  precision: bf16
+  checkpoint_dir: checkpoints/pretrain_350m
+  checkpoint_every: 5000
+  eval_every: 2500
+  log_every: 10
+  use_wandb: false
+  wandb_project: codeforge-350m
