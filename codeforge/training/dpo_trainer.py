@@ -131,6 +131,7 @@ class DPOTrainer:
         beta: float = 0.1,
         batch_size: int = 2,
         learning_rate: float = 5e-7,
+        weight_decay: float = 0.01,
         max_steps: int = 2000,
         warmup_steps: int = 50,
         gradient_accumulation_steps: int = 4,
@@ -139,6 +140,12 @@ class DPOTrainer:
         checkpoint_every: int = 500,
         log_every: int = 10,
         precision: str = "bf16",
+        embed_lr_ratio: float = 1.0,
+        scheduler_type: str = "cosine",
+        stable_steps: int = 0,
+        decay_steps: int = 0,
+        min_lr_ratio: float = 0.0,
+        decay_type: str = "cosine",
     ):
         self.model = model
         self.ref_model = ref_model
@@ -160,12 +167,38 @@ class DPOTrainer:
         for param in self.ref_model.parameters():
             param.requires_grad = False
 
+        # Optimizer: 3 param groups (decay / no-decay / embedding)
+        from .optimizer import build_param_groups
+
+        param_groups = build_param_groups(
+            model, learning_rate, weight_decay, embed_lr_ratio,
+        )
+        use_fused = self.device.type == "cuda"
         self.optimizer = torch.optim.AdamW(
-            model.parameters(), lr=learning_rate, betas=(0.9, 0.95)
+            param_groups, lr=learning_rate, betas=(0.9, 0.95),
+            eps=1e-8, fused=use_fused,
         )
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer, warmup_steps, max_steps
-        )
+
+        # LR scheduler
+        if scheduler_type == "wsd":
+            from .scheduler import get_wsd_schedule
+
+            decay_len = decay_steps or (max_steps - warmup_steps - stable_steps)
+            if decay_len <= 0:
+                raise ValueError(
+                    f"WSD decay_steps resolved to {decay_len} "
+                    f"(max_steps={max_steps}, warmup={warmup_steps}, "
+                    f"stable={stable_steps}). Check your config."
+                )
+            self.scheduler = get_wsd_schedule(
+                self.optimizer, warmup_steps, stable_steps,
+                decay_len, min_lr_ratio, decay_type,
+            )
+        else:
+            self.scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, warmup_steps, max_steps,
+                min_lr_ratio=min_lr_ratio,
+            )
 
         self.use_amp = precision != "fp32" and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16

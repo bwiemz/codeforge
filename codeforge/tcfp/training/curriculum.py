@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass
+from typing import Any
 
 import torch.nn as nn
 
@@ -255,6 +256,18 @@ class ProgressiveQuantizer:
             module.srr = False
             if module.use_tensor_cores:
                 module._error_state = ErrorFeedbackState()
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize quantizer state for checkpointing."""
+        return {
+            "current_phase": self._current_phase,
+            "loss_history": list(self._loss_history),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore quantizer state from checkpoint."""
+        self._current_phase = state.get("current_phase", 0)
+        self._loss_history = list(state.get("loss_history", []))
 
 
 class QuantizationCurriculum:

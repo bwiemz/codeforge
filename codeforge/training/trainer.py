@@ -82,6 +82,12 @@ class TrainingConfig:
     # Reclaimer Protocol
     embed_lr_ratio: float = 0.1  # Embedding LR = learning_rate * this ratio
 
+    # LR schedule
+    scheduler_type: str = "cosine"  # "cosine" or "wsd"
+    stable_steps: int = 0           # WSD: hold at peak LR for this many steps
+    decay_steps: int = 0            # WSD: decay duration (0 = auto from max_steps)
+    decay_type: str = "cosine"      # WSD decay shape: "cosine" or "linear"
+
     @property
     def effective_batch_size(self) -> int:
         return self.batch_size * self.gradient_accumulation_steps
@@ -195,29 +201,11 @@ class Trainer:
 
         # Optimizer: Fused AdamW runs entirely on GPU — no CPU-GPU sync per step
         # 3 param groups: (1) decay, (2) no-decay, (3) embedding with separate LR
-        embed_param = model.tok_embeddings.weight  # Same tensor as output.weight (tied)
-        embed_ptr = embed_param.data_ptr()
+        from .optimizer import build_param_groups
 
-        no_decay = {"bias", "norm", "RMSNorm"}
-        decay_params = []
-        no_decay_params = []
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            if p.data_ptr() == embed_ptr:
-                continue  # Embedding goes in its own group
-            if any(nd in name for nd in no_decay):
-                no_decay_params.append(p)
-            else:
-                decay_params.append(p)
-
-        embed_lr = config.learning_rate * config.embed_lr_ratio
-
-        param_groups = [
-            {"params": decay_params, "weight_decay": config.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-            {"params": [embed_param], "lr": embed_lr, "weight_decay": 0.0},
-        ]
+        param_groups = build_param_groups(
+            model, config.learning_rate, config.weight_decay, config.embed_lr_ratio,
+        )
         use_fused = config.use_fused_optimizer and self.device.type == "cuda"
         self.optimizer = torch.optim.AdamW(
             param_groups,
@@ -230,12 +218,27 @@ class Trainer:
             print("  Using fused AdamW (GPU-resident optimizer)")
 
         # LR scheduler
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer,
-            config.warmup_steps,
-            config.max_steps,
-            config.min_lr_ratio,
-        )
+        if config.scheduler_type == "wsd":
+            from .scheduler import get_wsd_schedule
+
+            decay = config.decay_steps or (
+                config.max_steps - config.warmup_steps - config.stable_steps
+            )
+            if decay <= 0:
+                raise ValueError(
+                    f"WSD decay_steps resolved to {decay} "
+                    f"(max_steps={config.max_steps}, warmup={config.warmup_steps}, "
+                    f"stable={config.stable_steps}). Check your config."
+                )
+            self.scheduler = get_wsd_schedule(
+                self.optimizer, config.warmup_steps, config.stable_steps,
+                decay, config.min_lr_ratio, config.decay_type,
+            )
+        else:
+            self.scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, config.warmup_steps,
+                config.max_steps, config.min_lr_ratio,
+            )
 
         # Mixed precision — keep enabled even for TCFP (autocast benefits norms/embeddings)
         self.use_amp = config.precision != "fp32" and self.device.type == "cuda"
@@ -439,6 +442,12 @@ class Trainer:
         if self.config.use_tcfp and self._tcfp_monitor is not None:
             save_dict["tcfp_ef_state"] = self._collect_tcfp_ef_state()
 
+        # Save training config for resume validation
+        save_dict["training_config"] = {
+            k: v for k, v in self.config.__dict__.items()
+            if not k.startswith("_")
+        }
+
         torch.save(save_dict, ckpt_path)
         print(f"Checkpoint saved: {ckpt_path}")
 
@@ -467,6 +476,20 @@ class Trainer:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
         raw_model = self._raw_model_ref
+
+        # Validate model config compatibility
+        saved_config = ckpt.get("model_config", {})
+        current_config = raw_model.config.__dict__
+        critical_keys = ["dim", "n_layers", "n_heads", "n_kv_heads", "vocab_size"]
+        mismatches = [
+            f"  {k}: checkpoint={saved_config[k]}, current={current_config[k]}"
+            for k in critical_keys
+            if k in saved_config and saved_config[k] != current_config.get(k)
+        ]
+        if mismatches:
+            print("WARNING: Model config mismatch between checkpoint and current model:")
+            for m in mismatches:
+                print(m)
 
         if self.config.use_tcfp:
             # Model weights already loaded (with strict=True) by _load_model_weights_only()

@@ -116,6 +116,11 @@ def main():
         train_config.log_every = 5
         train_config.eval_every = 10
         train_config.checkpoint_every = 10
+        # WSD schedule: 5 warmup + 10 stable + 5 decay = 20 steps
+        train_config.scheduler_type = "wsd"
+        train_config.warmup_steps = 5
+        train_config.stable_steps = 10
+        train_config.decay_steps = 5
         dataset = SyntheticCodeDataset(
             vocab_size=model_config.vocab_size,
             seq_len=model_config.max_seq_len,
@@ -226,6 +231,61 @@ def main():
     # ---- Train ----
     trainer = Trainer(model, dataset, train_config, eval_dataset=eval_dataset)
     trainer.train()
+
+    # Smoke test: checkpoint round-trip validation
+    if args.smoke_test:
+        print(f"\n{'='*60}")
+        print("Smoke test: checkpoint round-trip validation")
+        print(f"{'='*60}")
+        ckpt_path = Path(train_config.checkpoint_dir) / "latest.pt"
+        if ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            # Verify required keys
+            required = [
+                "global_step", "tokens_seen", "model_state_dict",
+                "optimizer_state_dict", "scheduler_state_dict", "model_config",
+            ]
+            missing = [k for k in required if k not in ckpt]
+            if missing:
+                print(f"  FAIL: Missing checkpoint keys: {missing}")
+            else:
+                print(f"  Checkpoint keys: PASS ({len(ckpt)} keys)")
+
+            # Verify model loads cleanly
+            model2 = CodeForgeModel(model_config)
+            model2.load_state_dict(ckpt["model_state_dict"])
+            print("  Model reload: PASS")
+
+            # Verify Reclaimer config preserved
+            saved = ckpt["model_config"]
+            checks = {
+                "post_norm": saved.get("use_post_norm"),
+                "qk_norm": saved.get("use_qk_norm"),
+                "z_loss": saved.get("z_loss_alpha", 0) > 0,
+            }
+            print(f"  Reclaimer config: {checks}")
+
+            # Verify training_config saved
+            if "training_config" in ckpt:
+                tc = ckpt["training_config"]
+                print(
+                    f"  Training config: scheduler={tc.get('scheduler_type')}, "
+                    f"embed_lr_ratio={tc.get('embed_lr_ratio')}"
+                )
+            else:
+                print("  Training config: NOT SAVED (old format)")
+
+            # Verify optimizer has 3 param groups
+            n_groups = len(trainer.optimizer.param_groups)
+            print(f"  Optimizer groups: {n_groups} (expected 3)")
+
+            # Final LR from scheduler
+            final_lr = trainer.scheduler.get_last_lr()[0]
+            print(f"  Final LR: {final_lr:.6f}")
+            print(f"  Step: {ckpt['global_step']}, Tokens: {ckpt['tokens_seen']:,}")
+        else:
+            print(f"  SKIP: No checkpoint at {ckpt_path}")
+        print(f"{'='*60}\n")
 
     # Print data pipeline stats
     if hasattr(dataset, 'print_stats'):

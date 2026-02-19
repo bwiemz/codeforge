@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -153,6 +154,31 @@ class AdaptiveABDController:
     def get_state(self, layer_name: str) -> HysteresisState | None:
         """Return the HysteresisState for the named layer, or None if unseen."""
         return self._states.get(layer_name)
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize controller state for checkpointing."""
+        return {
+            "states": {
+                name: {
+                    "ef_norm_ema": s.ef_norm_ema,
+                    "abd_enabled": s.abd_enabled,
+                    "shield_steps": s.shield_steps,
+                    "step_count": s.step_count,
+                }
+                for name, s in self._states.items()
+            },
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore controller state from checkpoint."""
+        for name, s_dict in state.get("states", {}).items():
+            self._states[name] = HysteresisState(
+                layer_name=name,
+                ef_norm_ema=s_dict.get("ef_norm_ema", 0.0),
+                abd_enabled=s_dict.get("abd_enabled", False),
+                shield_steps=s_dict.get("shield_steps", 0),
+                step_count=s_dict.get("step_count", 0),
+            )
 
 
 class FisherSensitivityMap:
@@ -564,6 +590,41 @@ class MomentumAlignmentTracker:
             and not state.promoted_to_highway
             and not state.promoted_to_bf16
         ]
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize tracker state for checkpointing."""
+        return {
+            "step": self._step,
+            "states": {
+                name: {
+                    "alignment_ema": s.alignment_ema,
+                    "drag_steps": s.drag_steps,
+                    "checks_since_reset": s.checks_since_reset,
+                    "total_checks": s.total_checks,
+                    "resets_applied": s.resets_applied,
+                    "promoted_to_srr": s.promoted_to_srr,
+                    "promoted_to_highway": s.promoted_to_highway,
+                    "promoted_to_bf16": s.promoted_to_bf16,
+                }
+                for name, s in self._states.items()
+            },
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore tracker state from checkpoint."""
+        self._step = state.get("step", 0)
+        for name, s_dict in state.get("states", {}).items():
+            self._states[name] = MomentumAlignmentState(
+                layer_name=name,
+                alignment_ema=s_dict.get("alignment_ema", 0.0),
+                drag_steps=s_dict.get("drag_steps", 0),
+                checks_since_reset=s_dict.get("checks_since_reset", 0),
+                total_checks=s_dict.get("total_checks", 0),
+                resets_applied=s_dict.get("resets_applied", 0),
+                promoted_to_srr=s_dict.get("promoted_to_srr", False),
+                promoted_to_highway=s_dict.get("promoted_to_highway", False),
+                promoted_to_bf16=s_dict.get("promoted_to_bf16", False),
+            )
 
     def _get_alignment(
         self,

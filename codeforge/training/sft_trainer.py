@@ -165,6 +165,12 @@ class SFTTrainer:
         checkpoint_every: int = 1000,
         log_every: int = 10,
         precision: str = "bf16",
+        embed_lr_ratio: float = 1.0,
+        scheduler_type: str = "cosine",
+        stable_steps: int = 0,
+        decay_steps: int = 0,
+        min_lr_ratio: float = 0.0,
+        decay_type: str = "cosine",
     ):
         self.model = model
         self.dataset = dataset
@@ -181,17 +187,38 @@ class SFTTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = self.model.to(self.device)
 
-        # Optimizer
+        # Optimizer: 3 param groups (decay / no-decay / embedding)
+        from .optimizer import build_param_groups
+
+        param_groups = build_param_groups(
+            model, learning_rate, weight_decay, embed_lr_ratio,
+        )
+        use_fused = self.device.type == "cuda"
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.95),
+            param_groups, lr=learning_rate, betas=(0.9, 0.95),
+            eps=1e-8, fused=use_fused,
         )
 
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer, warmup_steps, max_steps, min_lr_ratio=0.0
-        )
+        # LR scheduler
+        if scheduler_type == "wsd":
+            from .scheduler import get_wsd_schedule
+
+            decay_len = decay_steps or (max_steps - warmup_steps - stable_steps)
+            if decay_len <= 0:
+                raise ValueError(
+                    f"WSD decay_steps resolved to {decay_len} "
+                    f"(max_steps={max_steps}, warmup={warmup_steps}, "
+                    f"stable={stable_steps}). Check your config."
+                )
+            self.scheduler = get_wsd_schedule(
+                self.optimizer, warmup_steps, stable_steps,
+                decay_len, min_lr_ratio, decay_type,
+            )
+        else:
+            self.scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, warmup_steps, max_steps,
+                min_lr_ratio=min_lr_ratio,
+            )
 
         self.use_amp = precision != "fp32" and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16

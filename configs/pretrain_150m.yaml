@@ -43,9 +43,15 @@ training:
   weight_decay: 0.1
   max_grad_norm: 1.0
   min_lr_ratio: 0.1
-  warmup_steps: 3000
   max_steps: 100000
   precision: bf16
+
+  # WSD schedule: 3K warmup + 80K stable + 17K decay = 100K steps
+  scheduler_type: wsd
+  warmup_steps: 3000
+  stable_steps: 80000
+  decay_steps: 17000
+  decay_type: cosine
   checkpoint_dir: checkpoints/pretrain_150m
   checkpoint_every: 500
   eval_every: 2500
