@@ -15,7 +15,7 @@ from .constants import (
     SPECIAL_TOKENS,
     VOCAB_SIZE,
 )
-from .training import train_tokenizer
+from .training import train_tokenizer, train_tokenizer_from_iterator
 from .validation import ValidationReport, validate_tokenizer
 from .wrapper import TCFPTokenizer
 
@@ -31,6 +31,7 @@ __all__ = [
     "check_alignment",
     "suggest_vocab_size",
     "train_tokenizer",
+    "train_tokenizer_from_iterator",
     "validate_tokenizer",
 ]
 

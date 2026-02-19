@@ -1,148 +1,271 @@
-"""Train the CodeForge BPE tokenizer on a code corpus."""
+"""Train the TCFP tokenizer on bigcode/starcoderdata.
+
+Streams code from HuggingFace with weighted language sampling to match
+the pretraining data distribution, then trains a 49,152-token byte-level
+BPE tokenizer aligned to FP8 tensor core tile boundaries.
+
+Usage:
+    python -m scripts.train_tokenizer
+    python -m scripts.train_tokenizer --num-samples 1000000
+    python -m scripts.train_tokenizer --from-files data/corpus/*.py
+"""
+
+from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codeforge.tokenizer.trainer import train_from_files, train_from_iterator
+from codeforge.tokenizer.config import TokenizerConfig
+from codeforge.tokenizer.training import train_tokenizer, train_tokenizer_from_iterator
+from codeforge.tokenizer.validation import validate_tokenizer
+from codeforge.tokenizer.wrapper import TCFPTokenizer
+
+# Language weights matching pretrain_150m.yaml
+LANGUAGE_WEIGHTS: dict[str, float] = {
+    "python": 0.35,
+    "javascript": 0.12,
+    "typescript": 0.12,
+    "java": 0.10,
+    "cpp": 0.08,
+    "c": 0.05,
+    "go": 0.07,
+    "rust": 0.07,
+}
+
+# Validation text samples per language
+VALIDATION_TEXTS: dict[str, str] = {
+    "python": (
+        "def fibonacci(n: int) -> list[int]:\n"
+        "    result = [0, 1]\n"
+        "    for i in range(2, n):\n"
+        "        result.append(result[i-1] + result[i-2])\n"
+        "    return result\n"
+    ),
+    "javascript": (
+        "async function fetchData(url) {\n"
+        "    const response = await fetch(url);\n"
+        "    if (!response.ok) throw new Error(`HTTP ${response.status}`);\n"
+        "    return response.json();\n"
+        "}\n"
+    ),
+    "typescript": (
+        "interface Config {\n"
+        "    readonly host: string;\n"
+        "    port: number;\n"
+        "    debug?: boolean;\n"
+        "}\n"
+        "const config: Config = { host: 'localhost', port: 8080 };\n"
+    ),
+    "java": (
+        "public class HashMap<K, V> {\n"
+        "    private Entry<K, V>[] table;\n"
+        "    public V get(Object key) {\n"
+        "        int hash = key.hashCode() & 0x7fffffff;\n"
+        "        return table[hash % table.length].value;\n"
+        "    }\n"
+        "}\n"
+    ),
+    "rust": (
+        "fn parse_config(path: &Path) -> Result<Config, Box<dyn Error>> {\n"
+        "    let contents = fs::read_to_string(path)?;\n"
+        "    let config: Config = serde_json::from_str(&contents)?;\n"
+        "    Ok(config)\n"
+        "}\n"
+    ),
+    "go": (
+        "func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {\n"
+        "    ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)\n"
+        "    defer cancel()\n"
+        "    result, err := s.db.QueryContext(ctx, query)\n"
+        "}\n"
+    ),
+    "cpp": (
+        "template<typename T>\n"
+        "class Vector {\n"
+        "    T* data_;\n"
+        "    size_t size_, capacity_;\n"
+        "public:\n"
+        "    void push_back(const T& value) {\n"
+        "        if (size_ == capacity_) reserve(capacity_ * 2);\n"
+        "        data_[size_++] = value;\n"
+        "    }\n"
+        "};\n"
+    ),
+}
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train CodeForge tokenizer")
+def weighted_stream_iterator(
+    dataset_name: str,
+    language_weights: dict[str, float],
+    num_samples: int,
+) -> tuple[int, "Iterator[str]"]:  # noqa: F821
+    """Stream weighted code samples from HuggingFace.
+
+    Opens one streaming dataset per language (via data_dir for starcoderdata),
+    then yields samples in proportion to the specified weights.
+
+    Returns (total_count, iterator) where total_count is for progress tracking.
+    """
+    from datasets import load_dataset
+
+    # Compute per-language sample counts
+    total_weight = sum(language_weights.values())
+    lang_counts: dict[str, int] = {}
+    for lang, weight in language_weights.items():
+        lang_counts[lang] = int(num_samples * weight / total_weight)
+
+    # Adjust rounding to hit exact total
+    assigned = sum(lang_counts.values())
+    if assigned < num_samples:
+        # Give remainder to highest-weight language
+        top_lang = max(language_weights, key=language_weights.get)  # type: ignore[arg-type]
+        lang_counts[top_lang] += num_samples - assigned
+
+    print(f"Target samples per language:")
+    for lang, count in sorted(lang_counts.items(), key=lambda x: -x[1]):
+        print(f"  {lang:>12}: {count:>7,} ({language_weights[lang]*100:.0f}%)")
+    print(f"  {'TOTAL':>12}: {num_samples:>7,}")
+
+    # Open streaming datasets
+    streams: dict[str, "Iterator"] = {}  # noqa: F821
+    for lang in language_weights:
+        try:
+            ds = load_dataset(dataset_name, data_dir=lang, split="train", streaming=True)
+            streams[lang] = iter(ds)
+            print(f"  Stream opened: {lang}")
+        except Exception as e:
+            print(f"  WARNING: Could not open stream for '{lang}': {e}")
+
+    if not streams:
+        raise RuntimeError(f"No language streams could be opened from {dataset_name}")
+
+    def _iterator():
+        counts: dict[str, int] = {lang: 0 for lang in streams}
+        skips: dict[str, int] = {lang: 0 for lang in streams}
+        max_skips_per_lang = 10_000  # guard against spinning on empty streams
+        total = 0
+        exhausted: set[str] = set()
+        t0 = time.time()
+
+        while total < num_samples and len(exhausted) < len(streams):
+            for lang, it in streams.items():
+                if lang in exhausted:
+                    continue
+                if counts[lang] >= lang_counts.get(lang, 0):
+                    exhausted.add(lang)
+                    continue
+
+                try:
+                    sample = next(it)
+                except StopIteration:
+                    exhausted.add(lang)
+                    print(f"  Stream '{lang}' exhausted at {counts[lang]:,} samples")
+                    continue
+
+                text = sample.get("content") or sample.get("code") or sample.get("text", "")
+                if not text or len(text.strip()) < 50:
+                    skips[lang] += 1
+                    if skips[lang] >= max_skips_per_lang:
+                        exhausted.add(lang)
+                        print(f"  Stream '{lang}' skipped too many short samples, marking exhausted")
+                    continue
+
+                skips[lang] = 0  # reset on success
+                yield text
+                counts[lang] += 1
+                total += 1
+
+                if total % 25_000 == 0:
+                    elapsed = time.time() - t0
+                    rate = total / elapsed
+                    eta = (num_samples - total) / rate if rate > 0 else 0
+                    print(
+                        f"  {total:>7,}/{num_samples:,} samples "
+                        f"({total/num_samples*100:.1f}%) "
+                        f"[{elapsed:.0f}s elapsed, ~{eta:.0f}s remaining]"
+                    )
+
+                if total >= num_samples:
+                    break
+
+        elapsed = time.time() - t0
+        print(f"\nStreaming complete: {total:,} samples in {elapsed:.1f}s")
+        for lang in sorted(counts):
+            target = lang_counts.get(lang, 0)
+            actual = counts[lang]
+            pct = actual / target * 100 if target > 0 else 0
+            print(f"  {lang:>12}: {actual:>7,} / {target:>7,} ({pct:.0f}%)")
+
+    return num_samples, _iterator()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Train the TCFP tokenizer (49,152 tokens, FP8-aligned)"
+    )
     parser.add_argument(
-        "--input", "-i",
+        "--from-files",
         nargs="+",
         default=None,
-        help="Input files or directories containing code",
+        help="Train from local code files/directories instead of HuggingFace",
+    )
+    parser.add_argument(
+        "--dataset",
+        default="bigcode/starcoderdata",
+        help="HuggingFace dataset (default: bigcode/starcoderdata)",
     )
     parser.add_argument(
         "--output", "-o",
-        default="tokenizer/codeforge.json",
-        help="Output path for trained tokenizer (default: tokenizer/codeforge.json)",
+        default="tokenizer",
+        help="Output directory (default: tokenizer/)",
     )
     parser.add_argument(
-        "--vocab-size", "-v",
-        type=int,
-        default=32000,
-        help="Vocabulary size (default: 32000)",
-    )
-    parser.add_argument(
-        "--from-hf",
-        type=str,
-        default=None,
-        help="HuggingFace dataset name (e.g., 'bigcode/starcoderdata')",
-    )
-    parser.add_argument(
-        "--languages",
-        nargs="+",
-        default=None,
-        help="Languages to include (e.g., python javascript typescript java)",
-    )
-    parser.add_argument(
-        "--num-samples",
+        "--num-samples", "-n",
         type=int,
         default=500_000,
-        help="Max samples for tokenizer training (default: 500000)",
+        help="Total samples for tokenizer training (default: 500,000)",
     )
     parser.add_argument(
-        "--hf-token",
-        type=str,
-        default=None,
-        help="HuggingFace token for gated datasets (persisted after first use)",
+        "--min-frequency",
+        type=int,
+        default=2,
+        help="Minimum BPE merge frequency (default: 2)",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip post-training validation",
     )
     args = parser.parse_args()
 
-    # HuggingFace login if token provided
-    if args.hf_token:
-        from huggingface_hub import login
-        login(token=args.hf_token)
-        print("Logged in to HuggingFace Hub")
+    config = TokenizerConfig(
+        output_dir=Path(args.output),
+        tokenizer_filename="codeforge.json",
+        min_frequency=args.min_frequency,
+    )
 
-    if args.from_hf:
-        # Train from HuggingFace dataset
-        try:
-            from datasets import load_dataset
-        except ImportError:
-            print("Error: `datasets` package required. Install with: pip install datasets")
-            sys.exit(1)
+    print("=" * 60)
+    print("TCFP Tokenizer Training")
+    print("=" * 60)
+    print(f"  Vocab size:     {config.vocab_size:,} ({config.vocab_size // 128} x 128 tiles)")
+    print(f"  BPE merges:     {config.bpe_vocab_size - 256:,} + 256 byte alphabet")
+    print(f"  Special tokens: {config.num_special_tokens}")
+    print(f"  Output:         {config.output_path}")
+    print(f"  Min frequency:  {config.min_frequency}")
+    print()
 
-        print(f"Loading dataset: {args.from_hf}")
-        if args.languages:
-            print(f"Languages: {', '.join(args.languages)}")
-        print(f"Max samples: {args.num_samples:,}")
+    t_start = time.time()
 
-        # starcoderdata supports data_dir for per-language loading
-        # Try loading per-language subsets if languages specified
-        datasets = []
-        if args.languages and "starcoderdata" in args.from_hf:
-            for lang in args.languages:
-                try:
-                    ds = load_dataset(
-                        args.from_hf, data_dir=lang,
-                        split="train", streaming=True,
-                    )
-                    datasets.append((lang, ds))
-                    print(f"  Loaded stream for: {lang}")
-                except Exception as e:
-                    print(f"  Warning: Could not load '{lang}': {e}")
-
-        if not datasets:
-            # Fallback: load full dataset and filter by lang column
-            ds = load_dataset(args.from_hf, split="train", streaming=True)
-            datasets.append(("all", ds))
-            print("  Loaded full dataset stream")
-
-        languages_lower = [l.lower() for l in args.languages] if args.languages else None
-
-        def text_iterator():
-            count = 0
-            # Round-robin across language datasets for diversity
-            iters = [(lang, iter(ds)) for lang, ds in datasets]
-            exhausted = set()
-
-            while count < args.num_samples and len(exhausted) < len(iters):
-                for idx, (lang, it) in enumerate(iters):
-                    if idx in exhausted:
-                        continue
-                    try:
-                        sample = next(it)
-                    except StopIteration:
-                        exhausted.add(idx)
-                        print(f"  Stream '{lang}' exhausted at {count:,} total samples")
-                        continue
-
-                    # Filter by language if needed (for non-per-language datasets)
-                    if languages_lower and lang == "all":
-                        sample_lang = (
-                            sample.get("lang") or sample.get("language") or ""
-                        ).lower()
-                        if sample_lang not in languages_lower:
-                            continue
-
-                    text = (
-                        sample.get("content")
-                        or sample.get("code")
-                        or sample.get("text", "")
-                    )
-                    if text and len(text.strip()) > 50:
-                        yield text
-                        count += 1
-                        if count % 10_000 == 0:
-                            print(f"  Processed {count:,} / {args.num_samples:,} samples...")
-                        if count >= args.num_samples:
-                            break
-
-        print("Training tokenizer...")
-        train_from_iterator(text_iterator(), args.output, args.vocab_size)
-
-    elif args.input:
-        # Collect all code files from input paths
-        files = []
-        extensions = {".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".go", ".rs", ".rb"}
-        for path_str in args.input:
+    if args.from_files:
+        # File-based training
+        extensions = {".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".go", ".rs"}
+        files: list[Path] = []
+        for path_str in args.from_files:
             path = Path(path_str)
             if path.is_file():
                 files.append(path)
@@ -151,14 +274,74 @@ def main():
                     files.extend(path.rglob(f"*{ext}"))
 
         if not files:
-            print(f"Error: No code files found in {args.input}")
+            print(f"ERROR: No code files found in {args.from_files}")
             sys.exit(1)
 
-        print(f"Training tokenizer on {len(files)} files...")
-        train_from_files(files, args.output, args.vocab_size)
+        print(f"Training on {len(files):,} local files...")
+        tokenizer = train_tokenizer(config, corpus_files=files)
     else:
-        print("Error: Provide --input paths or --from-hf dataset name")
-        sys.exit(1)
+        # HuggingFace streaming (default)
+        print(f"Streaming from: {args.dataset}")
+        print(f"Total samples:  {args.num_samples:,}")
+        print()
+
+        length, iterator = weighted_stream_iterator(
+            args.dataset,
+            LANGUAGE_WEIGHTS,
+            args.num_samples,
+        )
+
+        print(f"\nTraining BPE tokenizer...")
+        tokenizer = train_tokenizer_from_iterator(config, iterator, length=length)
+
+    t_train = time.time() - t_start
+    print(f"\nTraining complete in {t_train:.1f}s")
+    print(f"Saved to: {config.output_path}")
+
+    # Validation
+    if not args.skip_validation:
+        print("\n" + "=" * 60)
+        print("Validation")
+        print("=" * 60)
+
+        report = validate_tokenizer(
+            tokenizer,
+            validation_texts=VALIDATION_TEXTS,
+            roundtrip_samples=[
+                "    if x == 0:\n        return None\n",
+                "const arr = [1, 2, 3].map(x => x * 2);",
+                "fn main() { println!(\"Hello, world!\"); }",
+                "port = 8080\nhttp://localhost:8080/api/v2",
+                "  \t  \n\n  ",  # whitespace edge case
+                "x = 3.14159265358979323846",
+            ],
+        )
+        print(report.summary())
+
+        # Quick demo
+        print("\n" + "=" * 60)
+        print("Quick Demo")
+        print("=" * 60)
+        wrapper = TCFPTokenizer(config.output_path)
+        print(f"Vocab size: {wrapper.vocab_size:,}")
+        print(f"Pad ID: {wrapper.pad_id}, BOS: {wrapper.bos_id}, EOS: {wrapper.eos_id}")
+
+        demo = 'def hello(name: str) -> str:\n    return f"Hello, {name}!"'
+        ids = wrapper.encode(demo)
+        decoded = wrapper.decode(ids)
+        print(f"\nInput:   {demo!r}")
+        print(f"Tokens:  {len(ids)} IDs")
+        print(f"Decoded: {decoded!r}")
+        print(f"Match:   {demo == decoded}")
+
+        # Digit splitting check
+        digit_demo = "port = 8080"
+        digit_ids = wrapper.encode(digit_demo)
+        digit_tokens = [wrapper.decode([i]) for i in digit_ids]
+        print(f"\nDigit splitting: {digit_demo!r}")
+        print(f"Tokens: {digit_tokens}")
+
+    print(f"\nTotal time: {time.time() - t_start:.1f}s")
 
 
 if __name__ == "__main__":

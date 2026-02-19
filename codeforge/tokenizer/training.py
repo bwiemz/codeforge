@@ -8,7 +8,9 @@ result as a single JSON file.
 
 from __future__ import annotations
 
+import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from tokenizers import Regex, Tokenizer, models, trainers
@@ -107,11 +109,28 @@ def _configure_post_training(tokenizer: Tokenizer) -> None:
     )
 
 
+def _save_tokenizer(tokenizer: Tokenizer, config: TokenizerConfig) -> Path:
+    """Atomically save tokenizer to disk (temp file + rename)."""
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = config.output_dir / config.tokenizer_filename
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(config.output_dir), suffix=".tmp"
+    )
+    try:
+        os.close(fd)
+        tokenizer.save(tmp_path)
+        Path(tmp_path).replace(output_path)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+    return output_path
+
+
 def train_tokenizer(
     config: TokenizerConfig,
     corpus_files: list[Path] | None = None,
 ) -> Tokenizer:
-    """Full training pipeline: build → train → register specials → save.
+    """Full training pipeline: build -> train on files -> register specials -> save.
 
     Parameters
     ----------
@@ -138,28 +157,37 @@ def train_tokenizer(
     str_files = [str(p) for p in files]
     tokenizer.train(files=str_files, trainer=trainer)
 
-    # Add 64 special tokens at IDs 49088-49151
     register_special_tokens(tokenizer)
-
-    # Configure BOS/EOS post-processor and padding
     _configure_post_training(tokenizer)
+    _save_tokenizer(tokenizer, config)
+    return tokenizer
 
-    # Persist — save to temp file first, then rename for atomicity.
-    # Protects against disk-full / permission errors losing a long
-    # training run.
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = config.output_dir / config.tokenizer_filename
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(config.output_dir), suffix=".tmp"
-    )
-    try:
-        import os
 
-        os.close(fd)
-        tokenizer.save(tmp_path)
-        Path(tmp_path).replace(output_path)
-    except BaseException:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+def train_tokenizer_from_iterator(
+    config: TokenizerConfig,
+    iterator: Iterator[str],
+    length: int | None = None,
+) -> Tokenizer:
+    """Full training pipeline using a text iterator (e.g. HF dataset stream).
 
+    Parameters
+    ----------
+    config
+        Tokenizer configuration (vocab size, output path, etc.).
+    iterator
+        Yields text strings for BPE training.
+    length
+        Optional hint for progress bar (total number of items).
+
+    Returns
+    -------
+    Tokenizer
+        The trained tokenizer with all 49,152 tokens.
+    """
+    tokenizer, trainer = build_tokenizer_pipeline(config)
+    tokenizer.train_from_iterator(iterator, trainer=trainer, length=length)
+
+    register_special_tokens(tokenizer)
+    _configure_post_training(tokenizer)
+    _save_tokenizer(tokenizer, config)
     return tokenizer

@@ -120,7 +120,7 @@ class ValidationReport:
 
 def compute_compression_ratio(tokenizer: Tokenizer, text: str) -> float:
     """Compute bytes-per-token for *text*."""
-    encoded = tokenizer.encode(text)
+    encoded = tokenizer.encode(text, add_special_tokens=False)
     byte_len = len(text.encode("utf-8"))
     n_tokens = len(encoded.ids)
     if n_tokens == 0:
@@ -135,7 +135,7 @@ def check_roundtrip(
     """Verify ``decode(encode(text)) == text`` for all *samples*."""
     failures: list[str] = []
     for sample in samples:
-        encoded = tokenizer.encode(sample)
+        encoded = tokenizer.encode(sample, add_special_tokens=False)
         decoded = tokenizer.decode(encoded.ids)
         if decoded != sample:
             failures.append(
@@ -146,7 +146,7 @@ def check_roundtrip(
 
 def check_single_token(tokenizer: Tokenizer, text: str) -> bool:
     """Return True if *text* encodes to exactly one token."""
-    return len(tokenizer.encode(text).ids) == 1
+    return len(tokenizer.encode(text, add_special_tokens=False).ids) == 1
 
 
 def check_indentation(tokenizer: Tokenizer) -> dict[str, bool]:
