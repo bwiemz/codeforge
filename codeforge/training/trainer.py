@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import shutil
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,7 +107,10 @@ def _setup_torch_optimizations() -> None:
 
     # Inductor cache: use short path to avoid Windows MAX_PATH (260 char) limit.
     # Triton generates kernel filenames that can exceed this on Windows.
-    cache_dir = r"C:\tc"
+    if sys.platform == "win32":
+        cache_dir = r"C:\tc"
+    else:
+        cache_dir = os.path.join(tempfile.gettempdir(), "torchinductor")
     os.makedirs(cache_dir, exist_ok=True)
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", cache_dir)
     os.environ.setdefault("TRITON_CACHE_DIR", os.path.join(cache_dir, "triton"))

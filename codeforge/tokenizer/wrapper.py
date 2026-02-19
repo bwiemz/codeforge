@@ -137,6 +137,24 @@ class TCFPTokenizer:
     def code_end_id(self) -> int:
         return SPECIAL_TOKENS["<|code_end|>"]
 
+    # ── Uppercase aliases (used by dataset, inference, eval code) ─
+
+    @property
+    def EOS_ID(self) -> int:  # noqa: N802
+        return self.eos_id
+
+    @property
+    def PAD_ID(self) -> int:  # noqa: N802
+        return self.pad_id
+
+    @property
+    def BOS_ID(self) -> int:  # noqa: N802
+        return self.bos_id
+
+    @property
+    def ENDOFCODE_ID(self) -> int:  # noqa: N802
+        return self.code_end_id
+
     # ── Encode / decode ────────────────────────────────────────────
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:

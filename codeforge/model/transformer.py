@@ -19,9 +19,9 @@ def chunked_cross_entropy(
     """Compute cross-entropy loss in chunks along the sequence dimension.
 
     Instead of materializing the full (batch*seq_len, vocab_size) tensor at once,
-    this processes chunks of tokens at a time. For batch=8, seq=2048, vocab=32000:
-    - Standard: allocates 8*2048*32000*2 = ~1GB contiguous tensor
-    - Chunked (512): allocates 8*512*32000*2 = ~250MB at a time
+    this processes chunks of tokens at a time. For batch=8, seq=2048, vocab=49152:
+    - Standard: allocates 8*2048*49152*2 = ~1.5GB contiguous tensor
+    - Chunked (512): allocates 8*512*49152*2 = ~384MB at a time
 
     This reduces peak memory usage and improves cache locality.
     """
@@ -59,11 +59,8 @@ class TransformerBlock(nn.Module):
         self.ffn = FeedForward(config)
         self.layer_idx = layer_idx
 
-        # Depth-scaled residual: scale by 1/sqrt(2*n_layers) for stability
-        if config.depth_scaled_init:
-            self._residual_scale = 1.0 / math.sqrt(2 * config.n_layers)
-        else:
-            self._residual_scale = 1.0
+        # NOTE: depth scaling is applied at init time on wo/down_proj weights
+        # in CodeForgeModel.__init__ (not at runtime) to avoid double-scaling.
 
     def forward(
         self,
@@ -75,13 +72,13 @@ class TransformerBlock(nn.Module):
         if self.use_post_norm:
             # FOG post-norm: norm AFTER sublayer, BEFORE residual add
             attn_out, new_cache = self.attn(x, freqs, mask, kv_cache)
-            x = x + self.attn_norm(attn_out) * self._residual_scale
-            x = x + self.ffn_norm(self.ffn(x)) * self._residual_scale
+            x = x + self.attn_norm(attn_out)
+            x = x + self.ffn_norm(self.ffn(x))
         else:
             # Pre-norm (LLaMA-style): norm BEFORE sublayer
             attn_out, new_cache = self.attn(self.attn_norm(x), freqs, mask, kv_cache)
-            x = x + attn_out * self._residual_scale
-            x = x + self.ffn(self.ffn_norm(x)) * self._residual_scale
+            x = x + attn_out
+            x = x + self.ffn(self.ffn_norm(x))
 
         # Kurtosis capture (zero overhead when not requested; flag cleared after capture)
         if hasattr(self, '_capture_kurtosis') and self._capture_kurtosis:
@@ -137,13 +134,14 @@ class CodeForgeModel(nn.Module):
 
         self.apply(self._init_weights)
 
-        # Scale output projections by 1/sqrt(2*n_layers) for proper signal propagation
-        # Targets: attn.wo (attention output) and ffn.down_proj (FFN output)
-        output_scale = 1.0 / math.sqrt(2 * config.n_layers)
-        with torch.no_grad():
-            for layer in self.layers:
-                layer.attn.wo.weight.mul_(output_scale)
-                layer.ffn.down_proj.weight.mul_(output_scale)
+        # Depth-scaled init: scale output projections by 1/sqrt(2*n_layers)
+        # Applied at init time only (NOT at runtime) to avoid double-scaling.
+        if config.depth_scaled_init:
+            output_scale = 1.0 / math.sqrt(2 * config.n_layers)
+            with torch.no_grad():
+                for layer in self.layers:
+                    layer.attn.wo.weight.mul_(output_scale)
+                    layer.ffn.down_proj.weight.mul_(output_scale)
 
     def _init_weights(self, module: nn.Module) -> None:
         # Skip output projection — its weight IS tok_embeddings.weight (tied),
