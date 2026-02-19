@@ -19,6 +19,7 @@ from codeforge.data.dataset import (
     MixedCodeDataset,
     SyntheticCodeDataset,
 )
+from codeforge.data.pretokenized import PreTokenizedDataset
 from codeforge.model.config import ModelConfig, get_preset
 from codeforge.model.transformer import CodeForgeModel
 from codeforge.tokenizer.tokenizer import CodeForgeTokenizer
@@ -46,6 +47,8 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     parser.add_argument("--hf-token", type=str, default=None,
                         help="HuggingFace token for gated datasets")
+    parser.add_argument("--pretokenized", type=str, default=None,
+                        help="Path to pre-tokenized data dir (overrides data.pretokenized_path)")
     args = parser.parse_args()
 
     # HuggingFace login if token provided
@@ -159,28 +162,50 @@ def main():
         ])
         language_weights = data_config.get("language_weights")
 
-        dataset = MixedCodeDataset(
-            tokenizer=tokenizer,
-            max_seq_len=model_config.max_seq_len,
-            hf_dataset=hf_dataset,
-            languages=languages,
-            language_weights=language_weights,
-            quality_threshold=data_config.get("quality_threshold", 0.3),
-            enable_dedup=data_config.get("enable_dedup", True),
-            dedup_threshold=data_config.get("dedup_threshold", 0.8),
-            enable_decontamination=data_config.get("enable_decontamination", True),
-            fim_rate=data_config.get("fim_rate", 0.5),
-            seed=data_config.get("seed", 42),
-        )
+        # Check for pre-tokenized data (CLI flag or config)
+        pretokenized_path = args.pretokenized or data_config.get("pretokenized_path")
 
-        print("\nData pipeline:")
-        print(f"  Dataset: {hf_dataset}")
-        print(f"  Languages: {', '.join(languages)}")
-        print(f"  Quality threshold: {data_config.get('quality_threshold', 0.3)}")
-        dedup_thresh = data_config.get('dedup_threshold', 0.8)
-        print(f"  Dedup: {data_config.get('enable_dedup', True)} (threshold: {dedup_thresh})")
-        print(f"  Decontamination: {data_config.get('enable_decontamination', True)}")
-        print(f"  FIM rate: {data_config.get('fim_rate', 0.5)}")
+        if pretokenized_path:
+            pt_dir = Path(pretokenized_path)
+            if not pt_dir.exists():
+                print(f"\nError: Pre-tokenized data dir not found: {pretokenized_path}")
+                print("Run scripts/pretokenize.py first to generate it.")
+                sys.exit(1)
+            dataset = PreTokenizedDataset(
+                data_dir=pt_dir,
+                max_seq_len=model_config.max_seq_len,
+                eos_id=tokenizer.EOS_ID,
+                shuffle=True,
+                seed=data_config.get("seed", 42),
+            )
+            print("\nData pipeline: PRE-TOKENIZED")
+            print(f"  Source: {pretokenized_path}")
+            print(f"  Samples: {dataset.num_samples:,}")
+            print(f"  Tokens:  {dataset.total_tokens:,}")
+        else:
+            dataset = MixedCodeDataset(
+                tokenizer=tokenizer,
+                max_seq_len=model_config.max_seq_len,
+                hf_dataset=hf_dataset,
+                languages=languages,
+                language_weights=language_weights,
+                quality_threshold=data_config.get("quality_threshold", 0.3),
+                enable_dedup=data_config.get("enable_dedup", True),
+                dedup_threshold=data_config.get("dedup_threshold", 0.8),
+                enable_decontamination=data_config.get("enable_decontamination", True),
+                fim_rate=data_config.get("fim_rate", 0.5),
+                seed=data_config.get("seed", 42),
+            )
+            print("\nData pipeline:")
+            print(f"  Dataset: {hf_dataset}")
+            print(f"  Languages: {', '.join(languages)}")
+            print(f"  Quality threshold: {data_config.get('quality_threshold', 0.3)}")
+            dedup_thresh = data_config.get('dedup_threshold', 0.8)
+            print(f"  Dedup: {data_config.get('enable_dedup', True)} "
+                  f"(threshold: {dedup_thresh})")
+            print(f"  Decontamination: "
+                  f"{data_config.get('enable_decontamination', True)}")
+            print(f"  FIM rate: {data_config.get('fim_rate', 0.5)}")
 
         # Create eval dataset (held-out samples from the same source)
         eval_dataset = EvalCodeDataset(
