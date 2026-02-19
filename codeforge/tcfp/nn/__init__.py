@@ -379,7 +379,10 @@ class _TCFP12TensorCoreFunction(torch.autograd.Function):
             w_reconstructed = (
                 w_hi_fp8.float() * w_hi_inv + w_lo_fp8.float() * w_lo_inv
             )
-            quant_error = weight.float() - w_reconstructed
+            # Use error-corrected weight (w = weight + old_error), not raw weight.
+            # The quantization was performed on w, so the residual must be
+            # relative to w for proper error feedback accumulation.
+            quant_error = w - w_reconstructed
             error_state.update_error(param_name, quant_error)
 
         # --- 5. Flatten input to 2D, quantise activation once ---

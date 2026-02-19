@@ -1766,7 +1766,7 @@ def fused_dual_quantize_fp8(
     If ``error_buf`` is provided it is **modified in-place**: the kernel reads
     the old error, applies it (``w_corrected = weight + old_error``), and
     overwrites the buffer with the new quantisation error
-    (``new_error = weight - dequant(W_hi) - dequant(W_lo)``).
+    (``new_error = (weight + old_error) - dequant(W_hi) - dequant(W_lo)``).
 
     When ``stochastic_lo=True``, W_lo uses stochastic rounding (SR) instead
     of round-to-nearest.  ``E[SR(x)] = x`` (unbiased per-step), eliminating
@@ -1870,7 +1870,10 @@ def fused_dual_quantize_fp8(
     if has_error:
         w_hi_deq = block_dequantize_fp8(w_hi, scales_hi, block_size)
         w_lo_deq = block_dequantize_fp8(w_lo, scales_lo, block_size)
-        error_buf.copy_(weight.float() - w_hi_deq - w_lo_deq)  # type: ignore[union-attr]
+        # Error = w_corrected - reconstruction, where w_corrected = weight + old_error.
+        # The kernel quantized w_corrected (not raw weight), so we must include
+        # error_old to get the true quantization residual for error feedback.
+        error_buf.copy_(weight.float() + error_old - w_hi_deq - w_lo_deq)  # type: ignore[union-attr]
 
     return w_hi, w_lo, scales_hi, scales_lo
 
@@ -2308,14 +2311,14 @@ def fused_wtquant_block_scaled_dual_gemm_forward(
         num_sms_launch=num_sms_launch,
     )
 
-    # Post-step: compute new error = weight - dequant(W_hi) - dequant(W_lo).
-    # Done outside the kernel to avoid Triton cast-folding issues (same as
-    # fused_dual_quantize_fp8).
+    # Post-step: compute new error = w_corrected - reconstruction, where
+    # w_corrected = weight + error_old. Done outside the kernel to avoid
+    # Triton cast-folding issues (same as fused_dual_quantize_fp8).
     if has_error:
         w_hi_deq = block_dequantize_fp8(w_hi_out, scales_whi_out, block_size)
         w_lo_deq = block_dequantize_fp8(w_lo_out, scales_wlo_out, block_size)
         error_buf.copy_(  # type: ignore[union-attr]
-            weight.float() - w_hi_deq - w_lo_deq
+            weight.float() + error_old - w_hi_deq - w_lo_deq
         )
 
     if save_w_lo:
