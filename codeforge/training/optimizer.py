@@ -32,7 +32,7 @@ def build_param_groups(
     embed_param = model.tok_embeddings.weight  # type: ignore[union-attr]
     embed_ptr = embed_param.data_ptr()
 
-    no_decay_names = {"bias", "norm"}
+    no_decay_names = {"bias", "norm", "smooth_scale"}
     decay_params: list[nn.Parameter] = []
     no_decay_params: list[nn.Parameter] = []
 

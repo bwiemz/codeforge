@@ -22,9 +22,16 @@ class RMSNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """SwiGLU feed-forward network.
+    """SwiGLU feed-forward network with optional Smooth-SwiGLU.
 
-    Computes: output = down_proj(SiLU(gate_proj(x)) * up_proj(x))
+    Standard:  output = down_proj(SiLU(gate_proj(x)) * up_proj(x))
+    Smooth:    output = down_proj(SiLU(gate_proj(x)) * (up_proj(x) * smooth_scale))
+
+    Smooth-SwiGLU adds a per-channel learnable scale on the up_proj branch.
+    This prevents gate/up weight alignment under L2 regularization that causes
+    activation outliers during extended FP8 training (Intel/Habana ICLR 2025).
+    Initializes to 1.0 (identity at init). Can be folded into up_proj.weight
+    after training for zero inference cost.
     """
 
     def __init__(self, config: ModelConfig):
@@ -35,5 +42,13 @@ class FeedForward(nn.Module):
         self.down_proj = nn.Linear(hidden_dim, config.dim, bias=False)
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
+        self.smooth_scale: nn.Parameter | None = None
+        if config.use_smooth_swiglu:
+            self.smooth_scale = nn.Parameter(torch.ones(hidden_dim))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x)))
+        gate = F.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        if self.smooth_scale is not None:
+            up = up * self.smooth_scale
+        return self.dropout(self.down_proj(gate * up))

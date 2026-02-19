@@ -14,3 +14,4 @@ depth_scaled_init: true
 use_post_norm: true
 use_qk_norm: true
 z_loss_alpha: 1.0e-4
+use_smooth_swiglu: true

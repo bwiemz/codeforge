@@ -30,6 +30,7 @@ class ModelConfig:
     use_post_norm: bool = True       # FOG post-norm (norm after sublayer, before residual add)
     use_qk_norm: bool = True         # QK-RMSNorm with frozen gains before RoPE
     z_loss_alpha: float = 1e-4       # Z-loss coefficient (0.0 disables)
+    use_smooth_swiglu: bool = True   # Per-channel scale on up_proj to prevent gate/up alignment
 
     @property
     def head_dim(self) -> int:
@@ -61,6 +62,8 @@ class ModelConfig:
             + self.dim * self.dim  # output projection
         )
         ffn_per_layer = 3 * self.dim * self.ffn_hidden_dim  # gate, up, down
+        if self.use_smooth_swiglu:
+            ffn_per_layer += self.ffn_hidden_dim  # smooth_scale per layer
         norm_per_layer = 2 * self.dim  # 2x RMSNorm per layer
         qk_norm_per_layer = 2 * self.head_dim if self.use_qk_norm else 0
         total = (
