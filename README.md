@@ -10,7 +10,7 @@ CodeForge is a decoder-only transformer designed for code synthesis and understa
 
 | Concept | What it does |
 |---|---|
-| **TCFP-12** | FP8 E4M3 + 4-bit residual correction. ~12.5 bits/value, ~5–6 effective mantissa bits. 19% faster than BF16 on Ampere/Blackwell tensor cores. |
+| **TCFP-12** | FP8 E4M3 + 4-bit residual correction. ~12.5 bits/value, ~5–6 effective mantissa bits. 19% faster than BF16 on FP8-capable hardware (Hopper, Ada Lovelace, Blackwell). |
 | **Reclaimer Protocol** | Born-quantized training regime: QK-RMSNorm with frozen gains, post-norm (FOG) placement, z-loss stabilization, depth-scaled init. No full-precision warmup required. |
 | **ZSFTP** | Zero-Sync Fused Training Pipeline. GPU-resident loss accumulation, fused AdamW, chunked cross-entropy (75% peak VRAM reduction), `torch.compile` with Inductor, non-blocking prefetch. |
 

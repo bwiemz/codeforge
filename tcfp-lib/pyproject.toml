@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tcfp"
+version = "0.1.0"
+description = "TCFP-12: Near-BF16 quality at FP8 speed via dual-GEMM residual decomposition"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [{name = "bwiemz"}]
+keywords = [
+    "fp8", "quantization", "tensor-cores", "training",
+    "deep-learning", "transformer", "mixed-precision",
+    "bfloat16", "gemm", "triton",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "torch>=2.4.0",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=3.0.0"]
+dev = ["pytest>=7.0", "ruff>=0.4.0"]
+all = ["tcfp[triton,dev]"]
+
+[project.urls]
+Repository = "https://github.com/bwiemz/tcfp"
+Issues = "https://github.com/bwiemz/tcfp/issues"
+
+[tool.setuptools.packages.find]
+include = ["tcfp*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
