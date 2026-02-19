@@ -34,23 +34,24 @@ data:
   seed: 42
 
 training:
-  # Effective batch = 4 * 64 = 256 sequences
+  # Effective batch = 8 * 32 = 256 sequences
   # Tokens/step = 256 * 2048 = 524,288
-  # 100K steps = ~52B tokens
-  batch_size: 4
-  gradient_accumulation_steps: 64
+  # 45K steps = ~23.6B tokens (~208x params, aggressive Phi-style overtraining)
+  batch_size: 8
+  gradient_accumulation_steps: 32
+  num_workers: 2
   learning_rate: 3.0e-4
   weight_decay: 0.1
   max_grad_norm: 1.0
   min_lr_ratio: 0.1
-  max_steps: 100000
+  max_steps: 45000
   precision: bf16
 
-  # WSD schedule: 3K warmup + 80K stable + 17K decay = 100K steps
+  # WSD schedule: 1.5K warmup + 36K stable + 7.5K decay = 45K steps
   scheduler_type: wsd
-  warmup_steps: 3000
-  stable_steps: 80000
-  decay_steps: 17000
+  warmup_steps: 1500
+  stable_steps: 36000
+  decay_steps: 7500
   decay_type: cosine
   checkpoint_dir: checkpoints/pretrain_150m
   checkpoint_every: 500

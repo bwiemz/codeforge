@@ -440,7 +440,7 @@ class TestDiagnose:
         model = nn.Sequential(nn.Linear(128, 64))
         dummy = torch.randn(2, 128)
         # Mock _compute_snr_db to return a value below the 30 dB threshold
-        with patch("tcfp.nn._compute_snr_db", return_value=15.0):
+        with patch("codeforge.tcfp.nn._compute_snr_db", return_value=15.0):
             import warnings as _w
             with _w.catch_warnings(record=True) as caught:
                 _w.simplefilter("always")

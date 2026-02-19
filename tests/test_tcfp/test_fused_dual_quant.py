@@ -49,7 +49,7 @@ def _reference_dual_quantize(
     """Reference implementation using separate block_quantize_fp8 calls.
 
     Returns (w_hi_fp8, w_lo_fp8, scales_hi, scales_lo, new_error).
-    new_error = weight - dequant(w_hi) - dequant(w_lo).
+    new_error = (weight + old_error) - dequant(w_hi) - dequant(w_lo).
     """
     w = weight.float()
     if error_buf is not None:
@@ -68,8 +68,10 @@ def _reference_dual_quantize(
     )
     w_lo_deq = block_dequantize_fp8(w_lo_fp8, scales_lo, block_size)  # type: ignore[reportPossiblyUnboundVariable]
 
-    # Error relative to ORIGINAL weight (before error feedback)
-    new_error = w - (w_hi_deq + w_lo_deq)
+    # Error relative to error-corrected weight (w_corrected), not raw weight.
+    # The quantization was performed on w_corrected, so the residual must be
+    # relative to w_corrected for proper error feedback accumulation.
+    new_error = w_corrected - (w_hi_deq + w_lo_deq)
     return w_hi_fp8, w_lo_fp8, scales_hi, scales_lo, new_error
 
 
@@ -230,7 +232,7 @@ class TestErrorFeedback:
     """Verify in-place error buffer semantics."""
 
     def test_error_semantics(self) -> None:
-        """new_error = weight - dequant(quantize(weight + old_error))."""
+        """new_error = (weight + old_error) - dequant(quantize(weight + old_error))."""
         torch.manual_seed(42)
         N, K, bs = 128, 256, 128
         w = torch.randn(N, K, device=DEVICE)
