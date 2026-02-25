@@ -1,0 +1,59 @@
+{
+  "total_tokens": 18264497789,
+  "total_samples": 14997299,
+  "vocab_size": 49152,
+  "tokenizer_path": "tokenizer\\codeforge.json",
+  "config_file": "configs/pretrain_150m.yaml",
+  "hf_dataset": "bigcode/starcoderdata",
+  "languages": [
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "cpp",
+    "c",
+    "go",
+    "rust"
+  ],
+  "data_config": {
+    "hf_dataset": "bigcode/starcoderdata",
+    "languages": [
+      "python",
+      "javascript",
+      "typescript",
+      "java",
+      "cpp",
+      "c",
+      "go",
+      "rust"
+    ],
+    "language_weights": {
+      "python": 0.35,
+      "javascript": 0.12,
+      "typescript": 0.12,
+      "java": 0.1,
+      "cpp": 0.08,
+      "c": 0.05,
+      "go": 0.07,
+      "rust": 0.07
+    },
+    "quality_threshold": 0.35,
+    "enable_dedup": true,
+    "dedup_threshold": 0.8,
+    "enable_decontamination": true,
+    "fim_rate": 0.5,
+    "gradient_checkpointing": true,
+    "seed": 42
+  },
+  "max_tokens_limit": 30000000000,
+  "elapsed_seconds": 275539.6,
+  "created": "2026-02-25T01:56:18.365468+00:00",
+  "complete": false,
+  "mixer_stats": {
+    "total_seen": 15126183,
+    "quality_filtered": 128093,
+    "dedup_filtered": 789,
+    "decontam_filtered": 0,
+    "passed": 14997299
+  }
+}

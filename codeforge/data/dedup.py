@@ -4,9 +4,16 @@ Removes near-duplicate code samples from training data to improve
 model quality and reduce memorization.
 """
 
+from __future__ import annotations
+
+import array
 import hashlib
 import struct
-from typing import Iterator, Optional
+from collections import deque
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # Large prime for hash computation
 _MERSENNE_PRIME = (1 << 61) - 1
@@ -66,7 +73,7 @@ class MinHasher:
 
     def jaccard_estimate(self, sig1: tuple[int, ...], sig2: tuple[int, ...]) -> float:
         """Estimate Jaccard similarity from two MinHash signatures."""
-        return sum(a == b for a, b in zip(sig1, sig2)) / self.num_perm
+        return sum(a == b for a, b in zip(sig1, sig2, strict=True)) / self.num_perm
 
 
 class LSHIndex:
@@ -79,8 +86,7 @@ class LSHIndex:
     def __init__(self, num_bands: int = 16, rows_per_band: int = 8):
         self.num_bands = num_bands
         self.rows_per_band = rows_per_band
-        # Each band maps: band_hash -> set of document IDs
-        self.buckets: list[dict[int, list[int]]] = [
+        self.buckets: list[dict[int, set[int]]] = [
             {} for _ in range(num_bands)
         ]
         self.num_docs = 0
@@ -91,31 +97,54 @@ class LSHIndex:
             start = band_idx * self.rows_per_band
             band = signature[start : start + self.rows_per_band]
             band_hash = hash(band)
-            if band_hash not in self.buckets[band_idx]:
-                self.buckets[band_idx][band_hash] = []
-            self.buckets[band_idx][band_hash].append(doc_id)
+            bucket = self.buckets[band_idx].get(band_hash)
+            if bucket is None:
+                self.buckets[band_idx][band_hash] = {doc_id}
+            else:
+                bucket.add(doc_id)
         self.num_docs += 1
 
-    def query(self, signature: tuple[int, ...]) -> set[int]:
-        """Find candidate duplicates for a signature."""
-        candidates = set()
+    def remove(self, doc_id: int, signature: tuple[int, ...]) -> None:
+        """Remove a document from the index."""
+        found = False
         for band_idx in range(self.num_bands):
             start = band_idx * self.rows_per_band
             band = signature[start : start + self.rows_per_band]
             band_hash = hash(band)
-            bucket = self.buckets[band_idx].get(band_hash, [])
-            candidates.update(bucket)
+            bucket = self.buckets[band_idx].get(band_hash)
+            if bucket is not None and doc_id in bucket:
+                bucket.discard(doc_id)
+                found = True
+                if not bucket:
+                    del self.buckets[band_idx][band_hash]
+        if found:
+            self.num_docs -= 1
+
+    def query(self, signature: tuple[int, ...]) -> set[int]:
+        """Find candidate duplicates for a signature."""
+        candidates: set[int] = set()
+        for band_idx in range(self.num_bands):
+            start = band_idx * self.rows_per_band
+            band = signature[start : start + self.rows_per_band]
+            band_hash = hash(band)
+            bucket = self.buckets[band_idx].get(band_hash)
+            if bucket is not None:
+                candidates.update(bucket)
         return candidates
 
 
 class Deduplicator:
     """Full near-deduplication pipeline using MinHash + LSH.
 
+    Uses a fixed-size ring buffer so memory stays bounded regardless of
+    how many samples are processed.  Signatures are stored as compact
+    ``array.array('I')`` (4 bytes per uint32) instead of Python tuples
+    to cut per-entry memory by ~4x.
+
     Usage:
         dedup = Deduplicator(threshold=0.8)
         for text in corpus:
             if dedup.is_unique(text):
-                # Keep this sample
                 dedup.add(text)
     """
 
@@ -125,40 +154,48 @@ class Deduplicator:
         num_perm: int = 128,
         ngram_size: int = 5,
         num_bands: int = 16,
-        max_entries: int = 1_000_000,
+        max_entries: int = 500_000,
     ):
         self.threshold = threshold
         self.num_bands = num_bands
+        self.num_perm = num_perm
         self.hasher = MinHasher(num_perm=num_perm, ngram_size=ngram_size)
         self.rows_per_band = num_perm // num_bands
         self.index = LSHIndex(num_bands=num_bands, rows_per_band=self.rows_per_band)
-        self.signatures: dict[int, tuple[int, ...]] = {}
-        self.next_id = 0
         self.max_entries = max_entries
 
-    def _evict_old_entries(self) -> None:
-        """Evict oldest 50% of entries when capacity is exceeded."""
-        keep_from = self.next_id // 2
-        old_count = len(self.signatures)
-        self.signatures = {k: v for k, v in self.signatures.items() if k >= keep_from}
-        self.index = LSHIndex(
-            num_bands=self.num_bands, rows_per_band=self.rows_per_band
-        )
-        for doc_id, sig in self.signatures.items():
-            self.index.insert(doc_id, sig)
-        print(f"  [Dedup] Evicted {old_count - len(self.signatures):,} entries, "
-              f"kept {len(self.signatures):,}")
+        # Ring buffer: deque of (doc_id, signature) for O(1) eviction of oldest
+        self._ring: deque[tuple[int, array.array[int]]] = deque()
+        # Fast lookup: doc_id -> compact signature
+        self._sigs: dict[int, array.array[int]] = {}
+        self._next_id = 0
+
+    def _compact_sig(self, sig: tuple[int, ...]) -> array.array[int]:
+        """Store signature as a compact unsigned-int array (~4 bytes/element)."""
+        a = array.array("I")
+        a.fromlist(list(sig))
+        return a
+
+    def _evict_oldest(self) -> None:
+        """Evict the single oldest entry (O(1) amortised)."""
+        doc_id, sig = self._ring.popleft()
+        # May already have been removed (shouldn't happen, but be safe)
+        if doc_id in self._sigs:
+            del self._sigs[doc_id]
+            self.index.remove(doc_id, tuple(sig))
 
     def add(self, text: str) -> int:
         """Add a document and return its ID."""
-        if len(self.signatures) >= self.max_entries:
-            self._evict_old_entries()
+        while len(self._sigs) >= self.max_entries and self._ring:
+            self._evict_oldest()
 
-        sig = self.hasher.signature(text)
-        doc_id = self.next_id
-        self.next_id += 1
-        self.signatures[doc_id] = sig
-        self.index.insert(doc_id, sig)
+        sig_tuple = self.hasher.signature(text)
+        sig_compact = self._compact_sig(sig_tuple)
+        doc_id = self._next_id
+        self._next_id += 1
+        self._sigs[doc_id] = sig_compact
+        self._ring.append((doc_id, sig_compact))
+        self.index.insert(doc_id, sig_tuple)
         return doc_id
 
     def is_unique(self, text: str) -> bool:
@@ -167,12 +204,18 @@ class Deduplicator:
         candidates = self.index.query(sig)
 
         for cand_id in candidates:
-            cand_sig = self.signatures[cand_id]
-            similarity = self.hasher.jaccard_estimate(sig, cand_sig)
+            cand_sig = self._sigs.get(cand_id)
+            if cand_sig is None:
+                continue  # Evicted between query and check
+            similarity = self.hasher.jaccard_estimate(sig, tuple(cand_sig))
             if similarity >= self.threshold:
                 return False
 
         return True
+
+    @property
+    def num_entries(self) -> int:
+        return len(self._sigs)
 
     def deduplicate_stream(self, texts: Iterator[str]) -> Iterator[str]:
         """Filter an iterator of texts, yielding only unique ones."""

@@ -2,8 +2,6 @@
 
 import random
 import re
-from typing import Optional
-
 
 # Map file extensions to language names
 EXTENSION_TO_LANG = {
@@ -26,7 +24,7 @@ LICENSE_PATTERNS = [
 ]
 
 
-def detect_language(filename: str) -> Optional[str]:
+def detect_language(filename: str) -> str | None:
     """Detect programming language from filename extension."""
     for ext, lang in EXTENSION_TO_LANG.items():
         if filename.endswith(ext):
@@ -34,7 +32,7 @@ def detect_language(filename: str) -> Optional[str]:
     return None
 
 
-def normalize_whitespace(code: str, tabs_to_spaces: Optional[int] = 4) -> str:
+def normalize_whitespace(code: str, tabs_to_spaces: int | None = 4) -> str:
     """Normalize whitespace in code."""
     if tabs_to_spaces is not None:
         code = code.replace("\t", " " * tabs_to_spaces)
@@ -98,20 +96,25 @@ def apply_fim_transform(
 
 def preprocess_code(
     code: str,
-    filename: Optional[str] = None,
+    filename: str | None = None,
     strip_license: bool = True,
     normalize_ws: bool = True,
-    tabs_to_spaces: Optional[int] = 4,
+    tabs_to_spaces: int | None = 4,
     max_line_length: int = 1000,
     min_lines: int = 3,
     max_lines: int = 10000,
-) -> Optional[str]:
+) -> str | None:
     """Full preprocessing pipeline for a code sample.
 
     Returns None if the sample should be filtered out.
     """
     if not code or not code.strip():
         return None
+
+    # Strip surrogate characters that cause UnicodeEncodeError downstream
+    code = code.encode("utf-8", errors="surrogatepass").decode(
+        "utf-8", errors="replace"
+    )
 
     if strip_license:
         code = strip_license_header(code)

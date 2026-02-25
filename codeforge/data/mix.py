@@ -4,14 +4,19 @@ Controls the mix of different programming languages and data sources
 during training, with higher-quality samples drawn more frequently.
 """
 
+from __future__ import annotations
+
 import random
-from typing import Iterator, Optional
+import time
+from typing import TYPE_CHECKING
 
-from .quality import compute_quality_score
-from .dedup import Deduplicator
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 from .decontaminate import Decontaminator
-from .preprocessing import preprocess_code, detect_language, apply_fim_transform
-
+from .dedup import Deduplicator
+from .preprocessing import apply_fim_transform, detect_language, preprocess_code
+from .quality import compute_quality_score
 
 # Default language mix ratios (should sum to ~1.0)
 # Weighted toward languages most useful for coding assistance
@@ -45,7 +50,7 @@ class DataMixer:
 
     def __init__(
         self,
-        language_weights: Optional[dict[str, float]] = None,
+        language_weights: dict[str, float] | None = None,
         quality_threshold: float = 0.3,
         quality_upsample: bool = True,
         enable_dedup: bool = True,
@@ -81,9 +86,9 @@ class DataMixer:
     def process_sample(
         self,
         code: str,
-        filename: Optional[str] = None,
-        language: Optional[str] = None,
-    ) -> Optional[str]:
+        filename: str | None = None,
+        language: str | None = None,
+    ) -> str | None:
         """Process a single code sample through the full pipeline.
 
         Returns processed code or None if filtered out.
@@ -95,10 +100,11 @@ class DataMixer:
             language = detect_language(filename)
 
         # Preprocess
-        code = preprocess_code(code)
-        if code is None:
+        processed = preprocess_code(code)
+        if processed is None:
             self.stats["quality_filtered"] += 1
             return None
+        code = processed
 
         # Quality check
         quality = compute_quality_score(code, language)
@@ -136,12 +142,16 @@ class DataMixer:
         self,
         streams: dict[str, Iterator[str]],
         log_every: int = 10_000,
+        max_retries: int = 5,
+        retry_base_delay: float = 10.0,
     ) -> Iterator[str]:
         """Mix multiple language-tagged streams according to configured weights.
 
         Args:
             streams: Dict mapping language name to iterators of code strings
             log_every: Print progress every N passed samples
+            max_retries: Max consecutive retries per-language on transient errors
+            retry_base_delay: Base delay in seconds for exponential backoff
 
         Yields:
             Processed code samples in mixed order
@@ -152,34 +162,54 @@ class DataMixer:
         total = sum(weights)
         weights = [w / total for w in weights]
 
-        # Create iterators with StopIteration handling
         active_iters = {lang: iter(stream) for lang, stream in streams.items()}
-        exhausted = set()
+        exhausted: set[str] = set()
+        # Track consecutive failures per language for backoff
+        consecutive_errors: dict[str, int] = {lang: 0 for lang in languages}
 
         while len(exhausted) < len(languages):
-            # Weighted random language selection
             available = [
-                (lang, w) for lang, w in zip(languages, weights)
+                (lang, w)
+                for lang, w in zip(languages, weights, strict=True)
                 if lang not in exhausted
             ]
             if not available:
                 break
 
-            avail_langs, avail_weights = zip(*available)
+            avail_langs, avail_weights = zip(*available, strict=True)
             total_w = sum(avail_weights)
             avail_weights = [w / total_w for w in avail_weights]
             lang = self.rng.choices(avail_langs, weights=avail_weights, k=1)[0]
 
+            # Retry logic scoped to stream iteration only — bugs in
+            # process_sample() propagate immediately, never retried.
             try:
                 code = next(active_iters[lang])
-                result = self.process_sample(code, language=lang)
-                if result is not None:
-                    if self.stats["passed"] % log_every == 0 and self.stats["passed"] > 0:
-                        self._log_progress()
-                    yield result
+                consecutive_errors[lang] = 0
             except StopIteration:
                 exhausted.add(lang)
                 print(f"  [DataMixer] Language '{lang}' stream exhausted")
+                continue
+            except Exception as e:
+                consecutive_errors[lang] += 1
+                n = consecutive_errors[lang]
+                if n > max_retries:
+                    exhausted.add(lang)
+                    print(f"  [DataMixer] Language '{lang}' failed after "
+                          f"{max_retries} retries, marking exhausted: {e}")
+                else:
+                    delay = retry_base_delay * (2 ** (n - 1))
+                    print(f"  [DataMixer] Transient error on '{lang}' "
+                          f"(attempt {n}/{max_retries}), retrying in "
+                          f"{delay:.0f}s: {type(e).__name__}: {e}")
+                    time.sleep(delay)
+                continue
+
+            result = self.process_sample(code, language=lang)
+            if result is not None:
+                if self.stats["passed"] % log_every == 0 and self.stats["passed"] > 0:
+                    self._log_progress()
+                yield result
 
     def _log_progress(self) -> None:
         """Print periodic progress update."""
@@ -198,9 +228,13 @@ class DataMixer:
         """Print filtering statistics."""
         s = self.stats
         total = s["total_seen"] or 1
-        print(f"\nData mixing stats:")
+        qual_pct = 100 * s["quality_filtered"] / total
+        dedup_pct = 100 * s["dedup_filtered"] / total
+        decontam_pct = 100 * s["decontam_filtered"] / total
+        pass_pct = 100 * s["passed"] / total
+        print("\nData mixing stats:")
         print(f"  Total seen:          {s['total_seen']:,}")
-        print(f"  Quality filtered:    {s['quality_filtered']:,} ({100*s['quality_filtered']/total:.1f}%)")
-        print(f"  Dedup filtered:      {s['dedup_filtered']:,} ({100*s['dedup_filtered']/total:.1f}%)")
-        print(f"  Decontam filtered:   {s['decontam_filtered']:,} ({100*s['decontam_filtered']/total:.1f}%)")
-        print(f"  Passed:              {s['passed']:,} ({100*s['passed']/total:.1f}%)")
+        print(f"  Quality filtered:    {s['quality_filtered']:,} ({qual_pct:.1f}%)")
+        print(f"  Dedup filtered:      {s['dedup_filtered']:,} ({dedup_pct:.1f}%)")
+        print(f"  Decontam filtered:   {s['decontam_filtered']:,} ({decontam_pct:.1f}%)")
+        print(f"  Passed:              {s['passed']:,} ({pass_pct:.1f}%)")

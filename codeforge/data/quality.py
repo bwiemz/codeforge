@@ -5,14 +5,12 @@ Higher quality code should be sampled more frequently during training.
 """
 
 import re
-import math
-from typing import Optional
 
 
 # Heuristic quality signals
 def compute_quality_score(
     code: str,
-    language: Optional[str] = None,
+    language: str | None = None,
     max_score: float = 1.0,
 ) -> float:
     """Compute a quality score for a code sample in [0, max_score].
@@ -37,7 +35,7 @@ def compute_quality_score(
     scores = []
 
     # 1. Line length distribution (prefer 20-100 char avg)
-    avg_len = sum(len(l) for l in lines) / n_lines
+    avg_len = sum(len(ln) for ln in lines) / n_lines
     if 20 <= avg_len <= 100:
         scores.append(1.0)
     elif avg_len < 10 or avg_len > 200:
@@ -57,7 +55,7 @@ def compute_quality_score(
         "rust": r"^\s*//",
     }
     pattern = comment_patterns.get(language, r"^\s*(#|//)")
-    comment_lines = sum(1 for l in lines if re.match(pattern, l))
+    comment_lines = sum(1 for ln in lines if re.match(pattern, ln))
     comment_ratio = comment_lines / n_lines
     if 0.05 <= comment_ratio <= 0.30:
         scores.append(1.0)
@@ -82,8 +80,8 @@ def compute_quality_score(
 
     # 4. Repetition ratio (lines that appear more than twice)
     line_counts = {}
-    for l in lines:
-        stripped = l.strip()
+    for ln in lines:
+        stripped = ln.strip()
         if stripped and len(stripped) > 5:  # Skip short/empty lines
             line_counts[stripped] = line_counts.get(stripped, 0) + 1
     repeated = sum(c - 1 for c in line_counts.values() if c > 2)
@@ -103,8 +101,8 @@ def compute_quality_score(
         try:
             compile(code, "<string>", "exec")
             scores.append(1.0)
-        except SyntaxError:
-            scores.append(0.1)  # Syntax error — very low quality
+        except (SyntaxError, UnicodeEncodeError, ValueError):
+            scores.append(0.1)  # Syntax error or bad encoding — very low quality
 
     # Weighted average
     return min(max_score, sum(scores) / len(scores))
@@ -112,9 +110,9 @@ def compute_quality_score(
 
 def filter_by_quality(
     code: str,
-    language: Optional[str] = None,
+    language: str | None = None,
     min_score: float = 0.3,
-) -> Optional[str]:
+) -> str | None:
     """Return code if it passes quality threshold, else None."""
     score = compute_quality_score(code, language)
     return code if score >= min_score else None
