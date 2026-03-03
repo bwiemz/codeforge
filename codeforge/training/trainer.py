@@ -692,6 +692,15 @@ class Trainer:
                         "step_ms": step_ms_avg,
                     }
 
+                    # GPU memory profiling
+                    if torch.cuda.is_available():
+                        _alloc = torch.cuda.memory_allocated() / (1024**3)
+                        _reserved = torch.cuda.memory_reserved() / (1024**3)
+                        _peak = torch.cuda.max_memory_allocated() / (1024**3)
+                        log_data["gpu_mem_alloc_gb"] = round(_alloc, 2)
+                        log_data["gpu_mem_reserved_gb"] = round(_reserved, 2)
+                        log_data["gpu_mem_peak_gb"] = round(_peak, 2)
+
                     # TCFP health monitoring and benchmark recording
                     if self.config.use_tcfp and self._tcfp_monitor is not None:
                         # Enable kurtosis capture at L3 intervals
@@ -724,6 +733,10 @@ class Trainer:
                                 for a in alerts
                             ],
                         }
+                        if torch.cuda.is_available():
+                            bench_record["gpu_mem_alloc_gb"] = log_data["gpu_mem_alloc_gb"]
+                            bench_record["gpu_mem_reserved_gb"] = log_data["gpu_mem_reserved_gb"]
+                            bench_record["gpu_mem_peak_gb"] = log_data["gpu_mem_peak_gb"]
                         if self._tcfp_bench_log is not None:
                             self._tcfp_bench_log.write(json.dumps(bench_record) + "\n")
                             self._tcfp_bench_log.flush()
@@ -736,13 +749,19 @@ class Trainer:
                                     f"| {alert.layer}: {alert.reason}"
                                 )
 
-                    pbar.set_postfix(
-                        loss=f"{loss_val:.4f}",
-                        lr=f"{lr:.2e}",
-                        gn=f"{gn:.2f}",
-                        tps=f"{tokens_per_sec:.0f}",
-                        ms=f"{step_ms_avg:.1f}",
-                    )
+                    _postfix = {
+                        "loss": f"{loss_val:.4f}",
+                        "lr": f"{lr:.2e}",
+                        "gn": f"{gn:.2f}",
+                        "tps": f"{tokens_per_sec:.0f}",
+                        "ms": f"{step_ms_avg:.1f}",
+                    }
+                    if "gpu_mem_alloc_gb" in log_data:
+                        _postfix["vram"] = (
+                            f"{log_data['gpu_mem_alloc_gb']:.1f}/"
+                            f"{log_data['gpu_mem_reserved_gb']:.1f}G"
+                        )
+                    pbar.set_postfix(_postfix)
                     pbar.update(self.config.log_every)
 
                     if self.wandb_run:

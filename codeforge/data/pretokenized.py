@@ -43,16 +43,21 @@ class PreTokenizedDataset(IterableDataset):
         self.seed = seed
         self._epoch = 0
 
-        tokens_path = self.data_dir / "tokens.bin"
+        self._tokens_path = self.data_dir / "tokens.bin"
         index_path = self.data_dir / "index.npy"
 
-        if not tokens_path.exists():
-            raise FileNotFoundError(f"Token file not found: {tokens_path}")
+        if not self._tokens_path.exists():
+            raise FileNotFoundError(f"Token file not found: {self._tokens_path}")
         if not index_path.exists():
             raise FileNotFoundError(f"Index file not found: {index_path}")
 
-        # Explicit little-endian uint16 for cross-platform compatibility
-        self.tokens = np.memmap(tokens_path, dtype="<u2", mode="r")
+        # Store token count without keeping the memmap open — avoids
+        # serialization failures when DataLoader spawns workers on Windows
+        # (memmap objects are too large to pickle through spawn).
+        self._total_tokens = self._tokens_path.stat().st_size // 2  # uint16
+
+        # Don't open memmap here — opened lazily in __iter__ per worker
+        self._tokens: np.memmap | None = None
 
         self.index = np.load(index_path)  # (N, 2) int64: (offset, length)
         if self.index.ndim == 1 and len(self.index) == 0:
@@ -70,7 +75,15 @@ class PreTokenizedDataset(IterableDataset):
 
     @property
     def total_tokens(self) -> int:
-        return len(self.tokens)
+        return self._total_tokens
+
+    def _get_tokens(self) -> np.memmap:
+        """Open memmap lazily (once per worker process)."""
+        if self._tokens is None:
+            self._tokens = np.memmap(
+                self._tokens_path, dtype="<u2", mode="r"
+            )
+        return self._tokens
 
     @property
     def num_samples(self) -> int:
@@ -99,9 +112,10 @@ class PreTokenizedDataset(IterableDataset):
         self, order: np.ndarray
     ) -> Iterator[list[int]]:
         """Yield token ID lists for each sample in the given order."""
+        tokens = self._get_tokens()
         for i in order:
             offset, length = int(self.index[i, 0]), int(self.index[i, 1])
-            ids = self.tokens[offset : offset + length].tolist()
+            ids = tokens[offset : offset + length].tolist()
             if len(ids) > 0:
                 yield ids
 

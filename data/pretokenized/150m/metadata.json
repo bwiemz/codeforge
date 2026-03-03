@@ -1,6 +1,6 @@
 {
-  "total_tokens": 18264497789,
-  "total_samples": 14997299,
+  "total_tokens": 30000000954,
+  "total_samples": 24868219,
   "vocab_size": 49152,
   "tokenizer_path": "tokenizer\\codeforge.json",
   "config_file": "configs/pretrain_150m.yaml",
@@ -46,14 +46,14 @@
     "seed": 42
   },
   "max_tokens_limit": 30000000000,
-  "elapsed_seconds": 275539.6,
-  "created": "2026-02-25T01:56:18.365468+00:00",
-  "complete": false,
+  "elapsed_seconds": 452202.9,
+  "created": "2026-02-27T03:00:45.047762+00:00",
+  "complete": true,
   "mixer_stats": {
-    "total_seen": 15126183,
-    "quality_filtered": 128093,
-    "dedup_filtered": 789,
+    "total_seen": 25083014,
+    "quality_filtered": 213472,
+    "dedup_filtered": 1321,
     "decontam_filtered": 0,
-    "passed": 14997299
+    "passed": 24868219
   }
 }
